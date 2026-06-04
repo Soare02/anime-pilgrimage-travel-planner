@@ -12,7 +12,7 @@ from langchain_core.messages import BaseMessage
 from langgraph.graph import StateGraph, END
 
 # Import tools from workspace
-from tools import get_anime_scene, get_weather
+from tools import get_anime_scene, get_weather, analyze_anime_scene_image
 
 load_dotenv()
 
@@ -47,6 +47,7 @@ PARSER_PROMPT = """
    - "ep": 字符串，出现集数（如 "EP1"、"第3集"，若未提供则为 null）
    - "timestamp": 字符串，时间戳（如 "0:25"、"11:45"，若未提供则为 null）
    - "geo": 字符串，坐标（如 "34.8903, 135.8002"，若未提供则为 null）
+   - "image": 字符串，Anitabi 动漫截图 URL（若用户输入中提供了"截图URL"字段则提取，否则为 null）
    - "rag_info": 字符串，如果在输入文本顶部的 "## 检索到的巡礼背景与攻略知识 (RAG Context)" 中有关于该地标的详细攻略、交通、最佳机位或名场面描写，请将该地标的全部相关背景内容提取并填入此处。如果 RAG Context 中没有提及该地标，或者只有一句话带过没有详细攻略，请填 null。
 
 请务必只返回 JSON 块，并用 ```json 和 ``` 包裹。
@@ -98,7 +99,7 @@ ROUTING_PROMPT = """
       "route_sequence": ["起点站", "地标1名称", "地标2名称", "返程站"],
       "transit_details": "详细的每日交通衔接描述，包含乘坐的铁路线、巴士、步行距离估算等",
       "landmarks": [
-        # 按游览顺序排列的地标对象列表（直接使用输入中该地标的完整字段，可额外添加 "visit_order" 字段）
+        # 按游览顺序排列的地标对象列表。必须保留输入中该地标的全部字段（包括 image, geo, final_info, ep 等），可额外添加 "visit_order" 字段
       ]
     }}
   ]
@@ -315,9 +316,30 @@ def info_retriever_node(state: AgentState, config=None) -> Dict[str, Any]:
             else:
                 lm["final_info"] = "未找到直接相关的动漫圣地巡礼背景信息（已过滤不相关搜索结果）。"
                 lm["source"] = "None (Filtered)"
-                
+
             completed_landmarks.append(lm)
-            
+
+        # MiMo 视觉分析：对有截图的 landmark 进行画面分析
+        image_url = lm.get("image")
+        if image_url and name and bangumi:
+            try:
+                if callback:
+                    callback(f"__STATUS__:正在进行MiMo视觉分析: {name}...\n")
+                vision_result = analyze_anime_scene_image(
+                    image_url=image_url,
+                    location_name=name,
+                    anime_title=bangumi,
+                    extra_context=lm.get("final_info", "")[:500]
+                )
+                if vision_result and not vision_result.startswith("[MiMo视觉分析异常]"):
+                    lm["final_info"] = (
+                        lm.get("final_info", "") +
+                        "\n\n[MiMo视觉分析]\n" + vision_result
+                    )
+                    lm["vision_analyzed"] = True
+            except Exception:
+                pass  # 视觉分析失败不阻塞流程
+
     return {
         "days": days,
         "completed_landmarks": completed_landmarks,
@@ -366,16 +388,56 @@ def anime_expert_node(state: AgentState, config=None) -> Dict[str, Any]:
     callback = config.get("configurable", {}).get("on_chunk_callback") if config else None
     if callback:
         callback("__STATUS__:正在匹配动漫原作场景时段与拍照建议...\n")
-        
+
     routing_draft = state["routing_draft"]
-    
+    completed_landmarks = state.get("completed_landmarks", [])
+
+    # 构建 name→image 查找表 + 已分析集合（从 completed_landmarks 中提取）
+    name_to_image = {}
+    vision_analyzed = set()
+    for lm in completed_landmarks:
+        n = lm.get("name")
+        img = lm.get("image")
+        if n and img:
+            name_to_image[n] = img
+        if lm.get("vision_analyzed"):
+            vision_analyzed.add(n)
+
+    # 对 routing_draft 中每个 landmark，有截图但未做过视觉分析的 → 调 MiMo
+    for day in routing_draft.get("days", []):
+        for lm in day.get("landmarks", []):
+            lm_name = lm.get("name")
+            if not lm_name:
+                continue
+            if lm_name in vision_analyzed:
+                continue
+            image_url = lm.get("image") or name_to_image.get(lm_name)
+            if not image_url:
+                continue
+            existing_info = lm.get("final_info", "") or ""
+            try:
+                if callback:
+                    callback(f"__STATUS__:MiMo视觉分析: {lm_name}...\n")
+                vision_result = analyze_anime_scene_image(
+                    image_url=image_url,
+                    location_name=lm_name,
+                    anime_title=lm.get("bangumi", ""),
+                    extra_context=existing_info[:500]
+                )
+                if vision_result and not vision_result.startswith("[MiMo视觉分析异常]"):
+                    lm["final_info"] = existing_info + "\n\n[MiMo视觉分析]\n" + vision_result
+                    vision_analyzed.add(lm_name)
+            except Exception:
+                pass
+
+    # 用视觉增强后的 routing_draft 交给 DeepSeek 生成拍照指南
     prompt = ANIME_EXPERT_PROMPT.format(
         routing_draft_json=json.dumps(routing_draft, ensure_ascii=False, indent=2)
     )
-    
+
     res = llm_deepseek.invoke(prompt).content
     refined_itinerary = parse_json_block(res)
-    
+
     return {
         "refined_itinerary": refined_itinerary
     }

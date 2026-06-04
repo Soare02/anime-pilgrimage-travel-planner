@@ -78,7 +78,8 @@ export async function generateAIRoute(days, landmarks, aiConfig, onChunk) {
             bangumiName: lm.bangumiName || '',
             ep: lm.ep != null ? String(lm.ep) : '',
             s: lm.s || null,
-            geo: lm.geo || null
+            geo: lm.geo || null,
+            image: lm.image || null
           }))
         })
       })

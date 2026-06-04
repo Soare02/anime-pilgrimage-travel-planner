@@ -26,6 +26,7 @@ class Landmark(BaseModel):
     ep: Optional[str] = None
     s: Optional[float] = None
     geo: Optional[List[float]] = None
+    image: Optional[str] = None
 
     @field_validator('ep', mode='before')
     @classmethod
@@ -89,6 +90,8 @@ def plan_route_endpoint(req: PlanRequest):
                 parts.append(f"   时间戳：{format_timestamp(lm.s)}")
             if lm.geo:
                 parts.append(f"   坐标：{lm.geo[0]}, {lm.geo[1]}")
+            if lm.image:
+                parts.append(f"   截图URL：{lm.image}")
             landmark_lines.append("\n".join(parts))
         
         data_text = f"巡礼天数：{req.days}天\n\n需要访问的地标（共{len(req.landmarks)}个）：\n" + "\n\n".join(landmark_lines)

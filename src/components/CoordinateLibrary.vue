@@ -113,16 +113,28 @@
           <div v-if="libraryAiResponse || loading" class="lib-ai-response">
             <div class="lib-ai-header">
               <span class="lib-ai-badge">AI 路线规划</span>
-              <el-button
-                v-if="parsedAiResponse.cleanMarkdown"
-                text
-                size="small"
-                class="lib-copy-btn"
-                @click="handleCopy"
-              >
-                <el-icon><DocumentCopy /></el-icon>
-                {{ copied ? '已复制' : '复制' }}
-              </el-button>
+              <div class="lib-ai-header-actions">
+                <el-button
+                  v-if="parsedAiResponse.cleanMarkdown"
+                  text
+                  size="small"
+                  class="lib-expand-btn"
+                  @click="openExpandedView('AI 路线规划详情', selectedLandmarks, parsedAiResponse.cleanMarkdown)"
+                >
+                  <el-icon><FullScreen /></el-icon>
+                  展开
+                </el-button>
+                <el-button
+                  v-if="parsedAiResponse.cleanMarkdown"
+                  text
+                  size="small"
+                  class="lib-copy-btn"
+                  @click="handleCopy"
+                >
+                  <el-icon><DocumentCopy /></el-icon>
+                  {{ copied ? '已复制' : '复制' }}
+                </el-button>
+              </div>
             </div>
             
             <!-- AI Planning Timeline Steps Loader -->
@@ -268,7 +280,27 @@
               </template>
 
               <div class="history-ai-response" v-if="record.aiResponse">
-                <div class="history-section-title">AI 回复</div>
+                <div class="history-section-title-row">
+                  <div class="history-section-title">AI 回复</div>
+                  <el-button
+                    text
+                    size="small"
+                    class="lib-expand-btn"
+                    @click="openExpandedView(
+                      '历史路线规划',
+                      (expandedCache[record.id]?.landmarkList || []).map(p => ({
+                        id: p.id,
+                        name: p.cn || p.name || p.id,
+                        image: p.image || '',
+                        bangumiName: p.bangumiName || ''
+                      })),
+                      record.aiResponse
+                    )"
+                  >
+                    <el-icon><FullScreen /></el-icon>
+                    展开
+                  </el-button>
+                </div>
                 <div class="lib-ai-content" v-html="renderMarkdown(record.aiResponse)"></div>
               </div>
             </div>
@@ -303,11 +335,48 @@
       <span>暂无图片</span>
     </div>
   </el-dialog>
+
+  <!-- 展开查看 AI 路线规划 -->
+  <el-dialog
+    v-model="expandedView.visible"
+    :title="expandedView.title"
+    :fullscreen="true"
+    :close-on-click-modal="true"
+    destroy-on-close
+    append-to-body
+  >
+    <div class="expanded-view">
+      <div class="expanded-left">
+        <h4>巡礼地标 ({{ expandedView.landmarks.length }})</h4>
+        <div class="expanded-landmark-list">
+          <div v-for="lm in expandedView.landmarks" :key="lm.id" class="expanded-landmark-item">
+            <div class="expanded-thumb" v-if="lm.image">
+              <img
+                :src="lm.image.includes('?') ? lm.image : lm.image + '?plan=h360'"
+                :alt="lm.name"
+                loading="lazy"
+              />
+            </div>
+            <div class="expanded-thumb placeholder" v-else>
+              <el-icon :size="20"><Picture /></el-icon>
+            </div>
+            <div class="expanded-lm-info">
+              <div class="expanded-lm-name">{{ lm.name }}</div>
+              <div class="expanded-lm-bangumi">{{ lm.bangumiName }}</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="expanded-right">
+        <div class="lib-ai-content" v-html="renderMarkdown(expandedView.markdown)"></div>
+      </div>
+    </div>
+  </el-dialog>
 </template>
 
 <script setup>
 import { ref, reactive, computed } from 'vue'
-import { Star, Close, ArrowDown, DocumentCopy, Clock, Loading, View, Picture } from '@element-plus/icons-vue'
+import { Star, Close, ArrowDown, DocumentCopy, Clock, Loading, View, Picture, FullScreen } from '@element-plus/icons-vue'
 import { useAppStore } from '../stores/app'
 import { storeToRefs } from 'pinia'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -317,7 +386,25 @@ const store = useAppStore()
 const { coordinateLibrary, librarySelected, libraryItinerary, libraryAiResponse, loading, routeHistory } = storeToRefs(store)
 
 const copied = ref(false)
+const expandedView = reactive({
+  visible: false,
+  title: '',
+  landmarks: [],
+  markdown: ''
+})
 const dayColors = ['#409EFF', '#67C23A', '#E6A23C', '#F56C6C', '#909399', '#b37feb', '#36cfc9']
+
+// 当前选中的地标（checked），用于展开视图左侧展示
+const selectedLandmarks = computed(() =>
+  coordinateLibrary.value.filter(e => e.checked)
+)
+
+function openExpandedView(title, landmarks, markdown) {
+  expandedView.title = title
+  expandedView.landmarks = landmarks
+  expandedView.markdown = markdown
+  expandedView.visible = true
+}
 
 const statusSteps = [
   '正在进行信息检索与验证...',
@@ -1002,6 +1089,12 @@ function renderMarkdown(text) {
   font-size: 12px;
   font-weight: 600;
   color: var(--text-color);
+}
+
+.history-section-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   margin-bottom: 6px;
 }
 
@@ -1284,5 +1377,146 @@ function renderMarkdown(text) {
   100% {
     box-shadow: 0 0 0 0 rgba(64, 158, 255, 0);
   }
+}
+
+/* Expand button group */
+.lib-ai-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+}
+
+.lib-expand-btn {
+  color: var(--text-secondary) !important;
+  transition: color 0.2s;
+}
+
+.lib-expand-btn:hover {
+  color: var(--primary-color) !important;
+}
+
+/* Expanded fullscreen view */
+.expanded-view {
+  display: flex;
+  height: calc(100vh - 120px);
+  gap: 24px;
+}
+
+.expanded-left {
+  width: 380px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border-color);
+  padding-right: 20px;
+}
+
+.expanded-left h4 {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-color);
+  margin: 0 0 12px;
+  flex-shrink: 0;
+}
+
+.expanded-landmark-list {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-right: 4px;
+}
+
+.expanded-landmark-list::-webkit-scrollbar {
+  width: 6px;
+}
+
+.expanded-landmark-list::-webkit-scrollbar-thumb {
+  background-color: rgba(0, 0, 0, 0.15);
+  border-radius: 3px;
+}
+
+.expanded-landmark-item {
+  display: flex;
+  gap: 12px;
+  padding: 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--card-bg);
+  align-items: center;
+  transition: border-color 0.2s;
+}
+
+.expanded-landmark-item:hover {
+  border-color: var(--primary-color);
+}
+
+.expanded-thumb {
+  width: 100px;
+  height: 64px;
+  flex-shrink: 0;
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--sidebar-bg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.expanded-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.expanded-thumb.placeholder {
+  color: var(--text-secondary);
+}
+
+.expanded-lm-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.expanded-lm-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-color);
+  line-height: 1.3;
+}
+
+.expanded-lm-bangumi {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.expanded-right {
+  flex: 1;
+  overflow-y: auto;
+  min-width: 0;
+  padding-right: 8px;
+}
+
+.expanded-right::-webkit-scrollbar {
+  width: 6px;
+}
+
+.expanded-right::-webkit-scrollbar-thumb {
+  background-color: rgba(0, 0, 0, 0.15);
+  border-radius: 3px;
+}
+
+.expanded-right .lib-ai-content {
+  font-size: 14px;
+  line-height: 1.8;
+}
+
+:deep(.el-dialog.is-fullscreen) {
+  background: var(--sidebar-bg);
 }
 </style>
