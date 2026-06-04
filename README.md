@@ -21,7 +21,8 @@ An interactive SPA for anime pilgrimage ("圣地巡礼") route planning — expl
   - **本地聚类** — 基于 Turf.js K-Means 空间聚类 + 最近邻排序，纯前端计算
   - **云端 AI** — 调用火山引擎 Ark API 等兼容 OpenAI 的云端大模型
   - **本地 AI** — 对接本地 LM Studio / Ollama 大模型
-  - **智能体 (Agent)** — 基于 LangGraph 的多智能体协同规划（信息检索 → 空间路由 → 动漫润色 → 审查校验）
+  - **智能体 (Agent)** — 基于 LangGraph 的多智能体协同规划（信息检索 → 空间路由 → 动漫润色 → 审查校验），集成 MiMo v2.5 视觉模型分析动漫截图
+- 👁️ **视觉场景分析** — Agent 模式中自动调用 MiMo v2.5 视觉模型分析 Anitabi 动漫截图，提取光照、角度、构图等画面信息，生成精准的拍照还原指南
 - 🧠 **RAG 增强检索** — 人机协同的向量检索系统，联网抓取巡礼攻略，人工审核后入库
 - 📋 **历史记录** — 路线规划结果持久化存储，支持回看和重新加载
 
@@ -63,6 +64,8 @@ An interactive SPA for anime pilgrimage ("圣地巡礼") route planning — expl
 | 构建工具 | Vite 5 |
 | 后端框架 | FastAPI + Uvicorn |
 | AI 框架 | LangChain + LangGraph |
+| 大语言模型 | DeepSeek V4 Flash (文本推理) |
+| 视觉模型 | MiMo v2.5 (动漫截图分析) |
 | 向量数据库 | ChromaDB |
 | Python 包管理 | uv |
 
@@ -78,6 +81,7 @@ An interactive SPA for anime pilgrimage ("圣地巡礼") route planning — expl
 | [Bangumi API](https://bgm.tv/) | 动漫作品元数据搜索 | 中文 ACG 社区索引 |
 | [Tavily Search](https://tavily.com/) | 巡礼攻略联网检索 (Agent 模式) | AI 搜索引擎 |
 | [wttr.in](https://wttr.in/) | 目的地实时天气 | 免费天气 API |
+| MiMo v2.5 | 动漫截图视觉分析 (Agent 模式) | 小米多模态视觉模型 |
 
 > **关于 Anitabi**：本项目依赖的开源地标数据来自 [anitabi.cn](https://anitabi.cn)，其 API 文档和数据库维护在 [anitabi/anitabi.cn-document](https://github.com/anitabi/anitabi.cn-document)。该项目的公开 API 为本工具提供了所有取景地的经纬度、动画截图和集数对照信息。
 
@@ -114,6 +118,11 @@ VITE_ARK_MODEL=
 # 后端 Agent 模式所需
 DEEPSEEK_API_KEY=your_deepseek_api_key
 TAVILY_API_KEY=your_tavily_api_key
+
+# MiMo 视觉模型 — Agent 模式中分析动漫截图时使用
+MIMO_API_KEY=your_mimo_api_key_here
+MIMO_MODEL=mimo-v2.5
+MIMO_BASE_URL=https://token-plan-cn.xiaomimimo.com/v1
 ```
 
 ### 3. 安装前端依赖
@@ -194,7 +203,7 @@ anime-travel/
 | **本地聚类** | 纯前端 Turf.js | 单个作品的快速多日分组 | 无需后端 |
 | **Cloud** | 云端大模型 API | 有火山引擎 / OpenAI 兼容 API Key | Vite 开发服务器 |
 | **Local** | 本地大模型 | 有 LM Studio / Ollama 本地部署 | 本地模型服务 |
-| **Agent** | Python 智能体 | 多作品综合巡礼，需要联网检索 | FastAPI 后端 |
+| **Agent** | Python 智能体 + MiMo 视觉 | 多作品综合巡礼，联网检索 + 截图视觉分析 | FastAPI 后端 |
 
 在网页 "AI 设置" 对话框中可自由切换，配置自动保存到浏览器。
 
@@ -208,6 +217,8 @@ anime-travel/
 - [Turf.js](https://turfjs.org/) — 浏览器端地理空间分析
 - [Element Plus](https://element-plus.org/) — Vue 3 UI 组件库
 - [LangChain](https://www.langchain.com/) + [LangGraph](https://langchain-ai.github.io/langgraph/) — AI Agent 框架
+- [DeepSeek](https://www.deepseek.com/) — 大语言模型
+- [MiMo](https://xiaomimimo.com/) — 多模态视觉模型
 - [ChromaDB](https://www.trychroma.com/) — 开源向量数据库
 - [LM Studio](https://lmstudio.ai/) — 本地大模型部署
 
