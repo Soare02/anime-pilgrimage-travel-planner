@@ -156,25 +156,44 @@ function createMarkerIcon(index, day, checked) {
   })
 }
 
+const escapeHtml = (s) => {
+  if (!s) return ''
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+const safeUrl = (url) => {
+  if (!url) return ''
+  return /^https?:\/\//.test(url) ? escapeHtml(url) : ''
+}
+
 function createPopupContent(point) {
+  const name = escapeHtml(point.name)
   const inLibrary = store.isInLibrary(point.id)
   let html = `<div class="landmark-popup">`
-  html += `<div class="popup-title">${point.name}</div>`
+  html += `<div class="popup-title">${name}</div>`
   if (point.image) {
     const imgUrl = point.image.includes('?') ? point.image : point.image + '?plan=h360'
-    html += `<img src="${imgUrl}" alt="${point.name}" class="popup-image" />`
+    html += `<img src="${escapeHtml(imgUrl)}" alt="${name}" class="popup-image" />`
   }
   html += `<div class="popup-info">`
-  if (point.ep) html += `<span>EP${point.ep}</span>`
-  if (point.s) html += `<span>${formatTime(point.s)}</span>`
-  if (point.day) html += `<span class="popup-day">第${point.day}天</span>`
+  if (point.ep) html += `<span>EP${escapeHtml(String(point.ep))}</span>`
+  if (point.s) html += `<span>${escapeHtml(formatTime(point.s))}</span>`
+  if (point.day) html += `<span class="popup-day">第${escapeHtml(String(point.day))}天</span>`
   html += `</div>`
   if (point.origin) {
     html += `<div class="popup-origin">来源: `
     if (point.originURL) {
-      html += `<a href="${point.originURL}" target="_blank" rel="noopener">${point.origin}</a>`
+      const url = safeUrl(point.originURL)
+      html += url
+        ? `<a href="${url}" target="_blank" rel="noopener">${escapeHtml(point.origin)}</a>`
+        : escapeHtml(point.origin)
     } else {
-      html += point.origin
+      html += escapeHtml(point.origin)
     }
     html += `</div>`
   }

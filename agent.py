@@ -4,6 +4,7 @@ import json
 import queue
 import threading
 import operator
+from concurrent.futures import ThreadPoolExecutor
 from typing import Annotated, List, Dict, Any, TypedDict
 from dotenv import load_dotenv
 
@@ -12,7 +13,14 @@ from langchain_core.messages import BaseMessage
 from langgraph.graph import StateGraph, END
 
 # Import tools from workspace
-from tools import get_anime_scene, get_weather, analyze_anime_scene_image
+from tools import (
+    get_anime_scene,
+    get_weather,
+    analyze_anime_scene_image,
+    MIMO_ERROR_PREFIX,
+    MIMO_SECTION_HEADER,
+    MIMO_NO_KEY_SUFFIX,
+)
 
 load_dotenv()
 
@@ -241,6 +249,32 @@ def parse_json_block(text: str) -> Dict[str, Any]:
                 pass
     return {}
 
+# 视觉分析 helper：封装 调用 MiMo → 检查哨兵 → 拼接 final_info → 置 vision_analyzed
+# 供 info_retriever_node 与 anime_expert_node 复用（避免 DRY）。
+# 返回 (是否成功分析, 是否因未配置key而跳过)，供调用方决定状态回调。
+def apply_vision_analysis(lm: Dict[str, Any], name: str, bangumi: str, image_url: str) -> tuple:
+    existing_info = lm.get("final_info", "") or ""
+    try:
+        vision_result = analyze_anime_scene_image(
+            image_url=image_url,
+            location_name=name,
+            anime_title=bangumi or "",
+            extra_context=existing_info[:500]
+        )
+    except Exception:
+        return (False, False)
+
+    if not vision_result:
+        return (False, False)
+    if vision_result.startswith(MIMO_ERROR_PREFIX):
+        # 区分"未配置 key"（配置性，可提示用户）与普通调用失败
+        no_key = MIMO_NO_KEY_SUFFIX in vision_result
+        return (False, no_key)
+
+    lm["final_info"] = existing_info + f"\n\n{MIMO_SECTION_HEADER}\n" + vision_result
+    lm["vision_analyzed"] = True
+    return (True, False)
+
 # ----------------- LangGraph Config -----------------
 
 class AgentState(TypedDict):
@@ -273,72 +307,74 @@ def info_retriever_node(state: AgentState, config=None) -> Dict[str, Any]:
     days = data.get("days", 1)
     landmarks = data.get("landmarks", [])
     
-    completed_landmarks = []
+    # M6: validate parsed result
+    if not landmarks:
+        if callback:
+            callback("__STATUS__:警告 — LLM 解析地标列表为空，请检查输入或重试\n")
+        raise RuntimeError("解析地标失败：LLM 返回的 landmarks 为空，请重新生成路线")
+
     total = len(landmarks)
-    for idx, lm in enumerate(landmarks):
+    completed_landmarks = [None] * total  # 预分配，保持顺序
+    # M5: 全局标记——仅首次发现未配置 key 时发状态回调，避免 N 次重复
+    mimo_no_key_warned = False
+
+    def process_landmark(idx, lm):
+        """处理单个 landmark（RAG/Tavily + MiMo），在 worker 线程中执行。"""
         name = lm.get("name")
-        bangumi = lm.get("bangumi")
+        bangumi = lm.get("bangumi") or ""
         ep = lm.get("ep") or ""
         timestamp = lm.get("timestamp") or ""
         rag_info = lm.get("rag_info")
-        
-        if callback and name:
-            callback(f"__STATUS__:正在检索与验证地标: {name} ({idx+1}/{total})...\n")
-        
-        # Check if RAG has info
+
+        # RAG 命中
         if rag_info and len(rag_info.strip()) > 30:
             lm["final_info"] = rag_info
             lm["source"] = "RAG Context"
-            completed_landmarks.append(lm)
         else:
-            # Query Tavily via get_anime_scene
-            search_res = get_anime_scene.func(
-                anime_title=bangumi,
-                episode=ep,
-                location_name=name,
-                timestamp=timestamp
-            )
-            
-            # Relevance validation
-            val_prompt = RELEVANCE_CHECK_PROMPT.format(
-                name=name,
-                bangumi=bangumi,
-                ep=ep,
-                timestamp=timestamp,
-                search_result=search_res
-            )
-            val_res = llm_deepseek.invoke(val_prompt).content
-            val_data = parse_json_block(val_res)
-            
-            if val_data.get("relevant", False):
-                lm["final_info"] = val_data.get("extracted_details") or search_res
-                lm["source"] = "Tavily Search (Validated)"
+            # M1: bangumi 为空时跳过 Tavily，直接写入明确提示
+            if not bangumi:
+                lm["final_info"] = "未提供作品名称，跳过场景检索"
+                lm["source"] = "None (No bangumi)"
             else:
-                lm["final_info"] = "未找到直接相关的动漫圣地巡礼背景信息（已过滤不相关搜索结果）。"
-                lm["source"] = "None (Filtered)"
+                search_res = get_anime_scene.func(
+                    anime_title=bangumi, episode=ep,
+                    location_name=name, timestamp=timestamp
+                )
+                val_prompt = RELEVANCE_CHECK_PROMPT.format(
+                    name=name, bangumi=bangumi, ep=ep,
+                    timestamp=timestamp, search_result=search_res
+                )
+                val_res = llm_deepseek.invoke(val_prompt).content
+                val_data = parse_json_block(val_res)
+                if val_data.get("relevant", False):
+                    lm["final_info"] = val_data.get("extracted_details") or search_res
+                    lm["source"] = "Tavily Search (Validated)"
+                else:
+                    lm["final_info"] = "未找到直接相关的动漫圣地巡礼背景信息（已过滤不相关搜索结果）。"
+                    lm["source"] = "None (Filtered)"
 
-            completed_landmarks.append(lm)
-
-        # MiMo 视觉分析：对有截图的 landmark 进行画面分析
+        # MiMo 视觉分析
         image_url = lm.get("image")
         if image_url and name and bangumi:
-            try:
-                if callback:
-                    callback(f"__STATUS__:正在进行MiMo视觉分析: {name}...\n")
-                vision_result = analyze_anime_scene_image(
-                    image_url=image_url,
-                    location_name=name,
-                    anime_title=bangumi,
-                    extra_context=lm.get("final_info", "")[:500]
-                )
-                if vision_result and not vision_result.startswith("[MiMo视觉分析异常]"):
-                    lm["final_info"] = (
-                        lm.get("final_info", "") +
-                        "\n\n[MiMo视觉分析]\n" + vision_result
-                    )
-                    lm["vision_analyzed"] = True
-            except Exception:
-                pass  # 视觉分析失败不阻塞流程
+            ok, no_key = apply_vision_analysis(lm, name, bangumi, image_url)
+            nonlocal mimo_no_key_warned
+            if no_key and not mimo_no_key_warned:
+                mimo_no_key_warned = True
+                cb = callback
+                if cb:
+                    cb(f"__STATUS__:MiMo视觉分析跳过（{MIMO_NO_KEY_SUFFIX}）\n")
+        return idx, lm
+
+    # M3: 用 ThreadPoolExecutor 并行化 per-landmark 工作
+    with ThreadPoolExecutor(max_workers=min(5, len(landmarks))) as executor:
+        futures = [executor.submit(process_landmark, i, lm) for i, lm in enumerate(landmarks)]
+        # 逐个等待以保持顺序，但提交是并发的
+        for future in futures:
+            idx, lm = future.result()
+            completed_landmarks[idx] = lm
+            name = lm.get("name")
+            if callback and name:
+                callback(f"__STATUS__:已完成检索与验证: {name} ({idx+1}/{len(landmarks)})\n")
 
     return {
         "days": days,
@@ -379,7 +415,27 @@ def routing_specialist_node(state: AgentState, config=None) -> Dict[str, Any]:
     
     res = llm_deepseek.invoke(prompt).content
     routing_draft = parse_json_block(res)
-    
+
+    # M6: validate routing result
+    if not routing_draft.get("days"):
+        if callback:
+            callback("__STATUS__:警告 — 路由规划失败，请重试或减少地标数量\n")
+        raise RuntimeError("路由规划失败：LLM 返回的 routing_draft.days 为空")
+
+    # M2: 程序化恢复 completed_landmarks 中的富集字段，不依赖 LLM 忠实复制
+    field_lookup = {}
+    for cl in landmarks:
+        n = cl.get("name")
+        if n:
+            field_lookup[n] = cl
+    for day in routing_draft.get("days", []):
+        for lm in day.get("landmarks", []):
+            ref = field_lookup.get(lm.get("name"))
+            if ref:
+                for key in ("final_info", "image", "geo", "ep", "bangumi", "vision_analyzed", "source"):
+                    if key in ref and not lm.get(key):
+                        lm[key] = ref[key]
+
     return {
         "routing_draft": routing_draft
     }
@@ -390,45 +446,22 @@ def anime_expert_node(state: AgentState, config=None) -> Dict[str, Any]:
         callback("__STATUS__:正在匹配动漫原作场景时段与拍照建议...\n")
 
     routing_draft = state["routing_draft"]
-    completed_landmarks = state.get("completed_landmarks", [])
 
-    # 构建 name→image 查找表 + 已分析集合（从 completed_landmarks 中提取）
-    name_to_image = {}
-    vision_analyzed = set()
-    for lm in completed_landmarks:
-        n = lm.get("name")
-        img = lm.get("image")
-        if n and img:
-            name_to_image[n] = img
-        if lm.get("vision_analyzed"):
-            vision_analyzed.add(n)
-
-    # 对 routing_draft 中每个 landmark，有截图但未做过视觉分析的 → 调 MiMo
+    # M2 已确保 routing_draft 中 landmarks 的 final_info/image/vision_analyzed 等字段
+    # 从 completed_landmarks 恢复。此处做兜底：若有 LLM 引入的新地标名且带截图 → 调 MiMo
     for day in routing_draft.get("days", []):
         for lm in day.get("landmarks", []):
             lm_name = lm.get("name")
-            if not lm_name:
+            image_url = lm.get("image")
+            if not lm_name or not image_url:
                 continue
-            if lm_name in vision_analyzed:
+            if lm.get("vision_analyzed"):
                 continue
-            image_url = lm.get("image") or name_to_image.get(lm_name)
-            if not image_url:
-                continue
-            existing_info = lm.get("final_info", "") or ""
-            try:
-                if callback:
-                    callback(f"__STATUS__:MiMo视觉分析: {lm_name}...\n")
-                vision_result = analyze_anime_scene_image(
-                    image_url=image_url,
-                    location_name=lm_name,
-                    anime_title=lm.get("bangumi", ""),
-                    extra_context=existing_info[:500]
-                )
-                if vision_result and not vision_result.startswith("[MiMo视觉分析异常]"):
-                    lm["final_info"] = existing_info + "\n\n[MiMo视觉分析]\n" + vision_result
-                    vision_analyzed.add(lm_name)
-            except Exception:
-                pass
+            # 兜底：M2 中 lookup 按 name 匹配未命中时，lm 没有 vision_analyzed 标记
+            bangumi = lm.get("bangumi") or ""
+            ok, no_key = apply_vision_analysis(lm, lm_name, bangumi, image_url)
+            if ok and callback:
+                callback(f"__STATUS__:MiMo视觉分析(兜底): {lm_name}...\n")
 
     # 用视觉增强后的 routing_draft 交给 DeepSeek 生成拍照指南
     prompt = ANIME_EXPERT_PROMPT.format(

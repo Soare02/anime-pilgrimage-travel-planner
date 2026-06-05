@@ -18,6 +18,7 @@ export const useAppStore = defineStore('app', () => {
   const libraryItinerary = ref([])
   const libraryDays = ref(1)
   const libraryAiResponse = ref('')
+  const generatedLandmarks = ref([])  // L2: 生成时的地标快照，展开视图用
   const routeHistory = ref(loadRouteHistory())
   const compareData = ref(null)
   const showAdminPage = ref(false)
@@ -321,7 +322,17 @@ export const useAppStore = defineStore('app', () => {
         }
       )
       libraryAiResponse.value = result
-      saveRouteHistory(selected, result, libraryDays.value, aiConfig.value.scheme)
+      // L2: 快照生成时的选中地标（深拷贝，不受后续 checkbox 变更影响）
+      generatedLandmarks.value = selected.map(lm => ({ ...lm }))
+      // H1: 仅有效 markdown（非纯 __STATUS__/__ERROR__）才存历史，避免脏数据入库
+      const hasMarkdown = result
+        .split('\n')
+        .filter(l => !l.startsWith('__STATUS__:') && !l.startsWith('__ERROR__:'))
+        .join('')
+        .trim()
+      if (hasMarkdown) {
+        saveRouteHistory(selected, result, libraryDays.value, aiConfig.value.scheme)
+      }
     } catch (e) {
       error.value = e.message || 'AI 路线规划失败'
     } finally {
@@ -371,6 +382,7 @@ export const useAppStore = defineStore('app', () => {
     libraryDays,
     librarySelected,
     libraryAiResponse,
+    generatedLandmarks,
     routeHistory,
     compareData,
     searchBangumi,

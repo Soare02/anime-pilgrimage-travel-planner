@@ -100,6 +100,11 @@ export async function generateAIRoute(days, landmarks, aiConfig, onChunk) {
           fullText += text
           onChunk(fullText)
         }
+        // H1: 检测流内的 __ERROR__ 哨兵（后端中途异常时写入）
+        const errorMatch = fullText.match(/__ERROR__:(.*)/)
+        if (errorMatch) {
+          throw new Error(errorMatch[1].trim() || 'AI 规划服务异常，请重试')
+        }
         return fullText
       } else {
         return await response.text()

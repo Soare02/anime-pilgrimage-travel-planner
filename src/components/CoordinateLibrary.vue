@@ -119,7 +119,7 @@
                   text
                   size="small"
                   class="lib-expand-btn"
-                  @click="openExpandedView('AI 路线规划详情', selectedLandmarks, parsedAiResponse.cleanMarkdown)"
+                  @click="openExpandedView('AI 路线规划详情', generatedLandmarks, parsedAiResponse.cleanMarkdown)"
                 >
                   <el-icon><FullScreen /></el-icon>
                   展开
@@ -191,11 +191,15 @@
             </div>
 
             <!-- Clean Markdown content once generated -->
-            <div 
-              v-if="parsedAiResponse.cleanMarkdown" 
-              class="lib-ai-content" 
+            <div
+              v-if="parsedAiResponse.cleanMarkdown"
+              class="lib-ai-content"
               v-html="renderMarkdown(parsedAiResponse.cleanMarkdown)"
             ></div>
+
+            <div v-if="!loading && !parsedAiResponse.cleanMarkdown && store.error" class="lib-ai-error">
+              <el-alert :title="store.error" type="error" show-icon :closable="false" />
+            </div>
           </div>
         </div>
       </template>
@@ -278,6 +282,10 @@
                   </div>
                 </div>
               </template>
+
+              <div v-if="expandedCache[record.id]?.failedCount" class="history-failed-warn">
+                注意：{{ expandedCache[record.id].failedCount }} 个地标信息加载失败
+              </div>
 
               <div class="history-ai-response" v-if="record.aiResponse">
                 <div class="history-section-title-row">
@@ -383,7 +391,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { fetchBangumiLite, fetchBangumiPointsDetail } from '../utils/api'
 
 const store = useAppStore()
-const { coordinateLibrary, librarySelected, libraryItinerary, libraryAiResponse, loading, routeHistory } = storeToRefs(store)
+const { coordinateLibrary, librarySelected, libraryItinerary, libraryAiResponse, loading, routeHistory, generatedLandmarks } = storeToRefs(store)
 
 const copied = ref(false)
 const expandedView = reactive({
@@ -513,6 +521,8 @@ async function loadHistoryDetail(record) {
   })
 
   const landmarkList = []
+  let failedCount = 0
+  let missedCount = 0
   for (const [bangumiId, pointIds] of Object.entries(groups)) {
     try {
       const [liteData, detailData] = await Promise.all([
@@ -522,16 +532,21 @@ async function loadHistoryDetail(record) {
       const bangumiName = liteData.cn || liteData.title || ''
       pointIds.forEach(pid => {
         const p = detailData.find(d => d.id === pid)
-        if (p) landmarkList.push({ ...p, bangumiName, bangumiId })
+        if (p) {
+          landmarkList.push({ ...p, bangumiName, bangumiId })
+        } else {
+          missedCount++  // API 返回了但未找到该 point（可能被移除）
+        }
       })
     } catch {
-      // skip failed bangumi
+      failedCount += pointIds.length  // 整组 API 调用失败
     }
   }
 
   if (expandedCache[record.id]) {
     expandedCache[record.id].landmarkList = landmarkList
     expandedCache[record.id].loading = false
+    expandedCache[record.id].failedCount = failedCount + missedCount
   }
 }
 
@@ -672,10 +687,22 @@ function renderMarkdown(text) {
     block = block.trim()
     if (!block) return ''
 
-    // 标题
-    if (/^### /.test(block)) return `<h4>${block.slice(4)}</h4>`
-    if (/^## /.test(block)) return `<h3>${block.slice(3)}</h3>`
-    if (/^# /.test(block)) return `<h2>${block.slice(2)}</h2>`
+    // 标题：仅取首行为标题，剩余行作正文（避免同块内容被吞进标题标签）
+    if (/^### /.test(block)) {
+      const nl = block.indexOf('\n')
+      if (nl === -1) return `<h4>${block.slice(4)}</h4>`
+      return `<h4>${block.slice(4, nl)}</h4><p>${block.slice(nl + 1).trim()}</p>`
+    }
+    if (/^## /.test(block)) {
+      const nl = block.indexOf('\n')
+      if (nl === -1) return `<h3>${block.slice(3)}</h3>`
+      return `<h3>${block.slice(3, nl)}</h3><p>${block.slice(nl + 1).trim()}</p>`
+    }
+    if (/^# /.test(block)) {
+      const nl = block.indexOf('\n')
+      if (nl === -1) return `<h2>${block.slice(2)}</h2>`
+      return `<h2>${block.slice(2, nl)}</h2><p>${block.slice(nl + 1).trim()}</p>`
+    }
 
     const lines = block.split('\n')
 
@@ -1518,5 +1545,22 @@ function renderMarkdown(text) {
 
 :deep(.el-dialog.is-fullscreen) {
   background: var(--sidebar-bg);
+}
+
+.lib-ai-error {
+  margin-top: 8px;
+}
+
+.lib-ai-error :deep(.el-alert__content) {
+  font-size: 12px;
+}
+
+.history-failed-warn {
+  font-size: 11px;
+  color: #E6A23C;
+  background: rgba(230, 162, 60, 0.08);
+  padding: 6px 10px;
+  border-radius: 6px;
+  margin-bottom: 8px;
 }
 </style>

@@ -1,4 +1,6 @@
 import os
+import re
+import json
 from dotenv import load_dotenv
 import requests
 from langchain.tools import tool
@@ -6,8 +8,16 @@ from tavily import TavilyClient
 from openai import OpenAI
 load_dotenv()
 
+# MiMo 视觉分析返回值哨兵常量（供 agent.py 跨模块复用，避免硬编码字符串）
+MIMO_ERROR_PREFIX = "[MiMo视觉分析异常]"
+MIMO_SECTION_HEADER = "[MiMo视觉分析]"
+# 配置性失败专用后缀：agent 据此判断是"未配置 key"而非"调用失败"
+MIMO_NO_KEY_SUFFIX = "未配置MIMO_API_KEY环境变量"
+
 # MiMo vision client (lazy init)
 _mimo_client = None
+# 一旦确认缺少 key，置位此 flag，避免每个地标重复尝试初始化并 raise
+_mimo_unavailable = False
 
 def _get_mimo_client():
     global _mimo_client
@@ -15,8 +25,9 @@ def _get_mimo_client():
         api_key = os.getenv("MIMO_API_KEY")
         base_url = os.getenv("MIMO_BASE_URL", "https://token-plan-cn.xiaomimimo.com/v1")
         if not api_key:
-            raise ValueError("未配置MIMO_API_KEY环境变量")
-        _mimo_client = OpenAI(api_key=api_key, base_url=base_url, timeout=30.0)
+            raise ValueError(MIMO_NO_KEY_SUFFIX)
+        # max_retries=0：失败已由调用方优雅处理，重试无收益且放大延迟（30s→90s）
+        _mimo_client = OpenAI(api_key=api_key, base_url=base_url, timeout=30.0, max_retries=0)
     return _mimo_client
 
 @tool
@@ -155,7 +166,17 @@ def analyze_anime_scene_image(image_url: str, location_name: str, anime_title: s
         anime_title: 动漫作品名称（如"吹响吧！上低音号"）
         extra_context: 额外的文字上下文（RAG/Tavily 检索结果摘要）
     """
-    client = _get_mimo_client()
+    global _mimo_unavailable
+    # 若此前已确认缺少 key，直接快速返回，避免重复 raise（每地标都触发）
+    if _mimo_unavailable:
+        return f"{MIMO_ERROR_PREFIX} {MIMO_NO_KEY_SUFFIX}"
+
+    try:
+        client = _get_mimo_client()
+    except ValueError as e:
+        _mimo_unavailable = True
+        return f"{MIMO_ERROR_PREFIX} {str(e)}"
+
     model = os.getenv("MIMO_MODEL", "mimo-v2.5")
 
     ctx_block = f"\n已知文字背景：{extra_context[:300]}" if extra_context else ""
@@ -192,11 +213,10 @@ def analyze_anime_scene_image(image_url: str, location_name: str, anime_title: s
         raw = response.choices[0].message.content
 
         # 尝试解析 JSON 并格式化为可读文本，便于下游 DeepSeek 消费
-        import re, json as _json
         match = re.search(r"```json\s*(.*?)\s*```", raw, re.DOTALL)
         if match:
             try:
-                data = _json.loads(match.group(1).strip())
+                data = json.loads(match.group(1).strip())
                 labels = {
                     "lighting": "光线特征", "time_of_day": "画面时段",
                     "season": "季节特征", "camera_angle": "拍摄角度",
@@ -215,4 +235,4 @@ def analyze_anime_scene_image(image_url: str, location_name: str, anime_title: s
 
         return raw
     except Exception as e:
-        return f"[MiMo视觉分析异常] {str(e)}"
+        return f"{MIMO_ERROR_PREFIX} {str(e)}"

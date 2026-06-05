@@ -1,4 +1,5 @@
 import os
+import traceback
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -9,11 +10,11 @@ from rag_service import rag_service
 
 app = FastAPI(title="Anime Pilgrimage Travel Planner Agent Server")
 
-# 启用 CORS 跨域支持
+# P2: 限制 CORS 为前端确切来源（Vite 代理）/ P3: localhost 个人工具无需额外鉴权
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -109,21 +110,26 @@ def plan_route_endpoint(req: PlanRequest):
         # 4. 定义流式生成器函数
         # 使用同步生成器配合同步 endpoint，FastAPI 会自动在独立的线程池中迭代它，避免阻塞主事件循环
         def event_generator():
-            stream_result = agent.stream(
-                {"messages": [{"role": "user", "content": data_text}]},
-                config={"recursion_limit": 15},
-                stream_mode="messages"
-            )
-            for chunk, metadata in stream_result:
-                if chunk.content:
-                    yield chunk.content
+            try:
+                stream_result = agent.stream(
+                    {"messages": [{"role": "user", "content": data_text}]},
+                    config={"recursion_limit": 15},
+                    stream_mode="messages"
+                )
+                for chunk, metadata in stream_result:
+                    if chunk.content:
+                        yield chunk.content
+            except Exception as e:
+                print(f"[plan_route_endpoint] pipeline exception: {traceback.format_exc()}")
+                yield f"\n__ERROR__:{str(e)}\n"
 
         response = StreamingResponse(event_generator(), media_type="text/plain")
         response.headers["X-RAG-Pending-Count"] = str(pending_count)
         return response
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f'[plan_route_endpoint] {traceback.format_exc()}')
+        raise HTTPException(status_code=500, detail='服务器内部错误')
 
 @app.get("/api/rag/landmarks")
 def get_rag_landmarks_endpoint():
@@ -153,7 +159,8 @@ def get_rag_landmarks_endpoint():
             
         return list(landmarks_dict.values())
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"获取 RAG 地标缓存失败: {str(e)}")
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail='服务器内部错误')
 
 @app.get("/api/rag/query")
 def query_rag_test_endpoint(query: str):
@@ -183,7 +190,8 @@ def query_rag_test_endpoint(query: str):
             })
         return results
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"RAG 检索与精排测试失败: {str(e)}")
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail='服务器内部错误')
 
 @app.post("/api/rag/clear")
 def clear_rag_database_endpoint():
@@ -191,7 +199,8 @@ def clear_rag_database_endpoint():
         rag_service.clear_database()
         return {"status": "success", "message": "RAG 向量数据库已清空且重置完成"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"清空 RAG 数据库失败: {str(e)}")
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail='服务器内部错误')
 
 @app.get("/api/rag/logs")
 def get_rag_logs_endpoint():
@@ -203,7 +212,8 @@ def get_rag_logs_endpoint():
         with open(log_file, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"获取 RAG 历史日志失败: {str(e)}")
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail='服务器内部错误')
 
 @app.post("/api/rag/logs/clear")
 def clear_rag_logs_endpoint():
@@ -213,7 +223,8 @@ def clear_rag_logs_endpoint():
             os.remove(log_file)
         return {"status": "success", "message": "RAG 历史日志已清空"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"清空 RAG 历史日志失败: {str(e)}")
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail='服务器内部错误')
 
 @app.get("/api/rag/pending")
 def get_pending_endpoint():
@@ -221,7 +232,8 @@ def get_pending_endpoint():
     try:
         return rag_service.get_pending_list()
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"获取待审核队列失败: {str(e)}")
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail='服务器内部错误')
 
 @app.post("/api/rag/pending/approve")
 def approve_pending_endpoint(req: ApproveRequest):
@@ -235,7 +247,8 @@ def approve_pending_endpoint(req: ApproveRequest):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"审批操作失败: {str(e)}")
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail='服务器内部错误')
 
 @app.post("/api/rag/pending/reject")
 def reject_pending_endpoint(req: RejectRequest):
@@ -249,7 +262,8 @@ def reject_pending_endpoint(req: RejectRequest):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"拒绝操作失败: {str(e)}")
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail='服务器内部错误')
 
 @app.delete("/api/rag/landmarks/{landmark_id}")
 def delete_landmark_endpoint(landmark_id: str):
@@ -263,7 +277,8 @@ def delete_landmark_endpoint(landmark_id: str):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"删除地标数据失败: {str(e)}")
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail='服务器内部错误')
 
 @app.get("/api/rag/landmark/{landmark_id}/chunks")
 def get_landmark_chunks_endpoint(landmark_id: str):
@@ -282,7 +297,8 @@ def get_landmark_chunks_endpoint(landmark_id: str):
             })
         return chunks
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"获取地标切片失败: {str(e)}")
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail='服务器内部错误')
 
 if __name__ == "__main__":
     import uvicorn
