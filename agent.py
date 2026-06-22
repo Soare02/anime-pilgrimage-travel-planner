@@ -249,6 +249,28 @@ def parse_json_block(text: str) -> Dict[str, Any]:
                 pass
     return {}
 
+
+def parse_landmark_aliases(text: str) -> Dict[str, Dict[str, str]]:
+    aliases = {}
+    for block in re.split(r"\n\s*\n", text):
+        name_match = re.search(r"地点名称[:：]\s*(.+)", block)
+        if not name_match:
+            continue
+
+        name = name_match.group(1).strip()
+        item = {}
+        original_match = re.search(r"日文地点名[:：]\s*(.+)", block)
+        bangumi_original_match = re.search(r"日文作品名[:：]\s*(.+)", block)
+        if original_match:
+            item["originalName"] = original_match.group(1).strip()
+        if bangumi_original_match:
+            item["bangumiOriginalName"] = bangumi_original_match.group(1).strip()
+
+        if item:
+            aliases[name] = item
+
+    return aliases
+
 # 视觉分析 helper：封装 调用 MiMo → 检查哨兵 → 拼接 final_info → 置 vision_analyzed
 # 供 info_retriever_node 与 anime_expert_node 复用（避免 DRY）。
 # 返回 (是否成功分析, 是否因未配置key而跳过)，供调用方决定状态回调。
@@ -306,6 +328,7 @@ def info_retriever_node(state: AgentState, config=None) -> Dict[str, Any]:
     
     days = data.get("days", 1)
     landmarks = data.get("landmarks", [])
+    landmark_aliases = parse_landmark_aliases(user_message)
     
     # M6: validate parsed result
     if not landmarks:
@@ -322,6 +345,13 @@ def info_retriever_node(state: AgentState, config=None) -> Dict[str, Any]:
         """处理单个 landmark（RAG/Tavily + MiMo），在 worker 线程中执行。"""
         name = lm.get("name")
         bangumi = lm.get("bangumi") or ""
+        aliases = landmark_aliases.get(name, {})
+        original_name = lm.get("originalName") or lm.get("original_name") or aliases.get("originalName", "")
+        bangumi_original_name = (
+            lm.get("bangumiOriginalName")
+            or lm.get("bangumi_original_name")
+            or aliases.get("bangumiOriginalName", "")
+        )
         ep = lm.get("ep") or ""
         timestamp = lm.get("timestamp") or ""
         rag_info = lm.get("rag_info")
@@ -338,7 +368,9 @@ def info_retriever_node(state: AgentState, config=None) -> Dict[str, Any]:
             else:
                 search_res = get_anime_scene.func(
                     anime_title=bangumi, episode=ep,
-                    location_name=name, timestamp=timestamp
+                    location_name=name, timestamp=timestamp,
+                    anime_title_ja=bangumi_original_name,
+                    location_name_ja=original_name
                 )
                 val_prompt = RELEVANCE_CHECK_PROMPT.format(
                     name=name, bangumi=bangumi, ep=ep,

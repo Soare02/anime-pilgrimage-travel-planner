@@ -4,6 +4,8 @@ import logging
 import requests
 import json
 import datetime
+import hashlib
+import time
 from typing import List, Dict, Any, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -13,6 +15,7 @@ from langchain_core.documents import Document
 from langchain_community.vectorstores import Chroma
 from openai import OpenAI
 from tavily import TavilyClient
+from tavily_config import get_tavily_include_domains, get_tavily_search_kwargs
 
 # Version-safe import for RecursiveCharacterTextSplitter
 try:
@@ -114,6 +117,8 @@ class LMStudioReranker:
         self.model = model
         self.base_url = (base_url or os.getenv("RERANK_BASE_URL", "http://localhost:1234/v1")).rstrip("/")
         self.top_n = top_n
+        self.failure_cooldown_seconds = int(os.getenv("RERANK_FAILURE_COOLDOWN_SECONDS", "60"))
+        self.unavailable_until = 0.0
 
     def _score_single(self, query: str, doc_content: str) -> float:
         url = f"{self.base_url}/responses"
@@ -178,6 +183,9 @@ class LMStudioReranker:
     def rerank_with_scores(self, query: str, documents: List[Document]) -> List[Tuple[int, float, Document]]:
         if not documents:
             return []
+
+        if self.unavailable_until > time.time():
+            return [(i, -1.0, doc) for i, doc in enumerate(documents)]
         
         scored = []
         has_error = False
@@ -191,6 +199,7 @@ class LMStudioReranker:
         
         if has_error:
             # 降级模式：直接返回原顺序，分数设为 -1.0
+            self.unavailable_until = time.time() + self.failure_cooldown_seconds
             return [(i, -1.0, doc) for i, doc in enumerate(documents)]
         
         scored.sort(key=lambda x: (-x[1], x[0]))
@@ -372,7 +381,294 @@ class RAGService:
         pending = self._read_pending()
         return any(p["landmark_id"] == landmark_id for p in pending)
 
-    def _search_single_landmark(self, name: str, bangumi: str) -> str:
+    def _clean_text_value(self, value: Any) -> str:
+        if value is None:
+            return ""
+        return str(value).strip()
+
+    def _is_unknown_value(self, value: Any) -> bool:
+        text = self._clean_text_value(value)
+        return not text or text.lower() in {"unknown", "none", "null"} or text in {"未知", "鏈煡"}
+
+    def _landmark_names(self, landmark: Dict[str, Any]) -> List[str]:
+        names = []
+        for key in ("name", "originalName"):
+            value = self._clean_text_value(landmark.get(key))
+            if value and value not in names:
+                names.append(value)
+        return names
+
+    def _bangumi_names(self, landmark: Dict[str, Any]) -> List[str]:
+        names = []
+        for key in ("bangumiName", "bangumiOriginalName"):
+            value = self._clean_text_value(landmark.get(key))
+            if not self._is_unknown_value(value) and value not in names:
+                names.append(value)
+        return names
+
+    def _build_landmark_rag_query(self, landmark: Dict[str, Any]) -> str:
+        parts = []
+        parts.extend(self._bangumi_names(landmark))
+        parts.extend(self._landmark_names(landmark))
+        geo = landmark.get("geo")
+        if isinstance(geo, (list, tuple)) and len(geo) >= 2:
+            parts.append(f"{geo[0]}, {geo[1]}")
+        elif geo:
+            parts.append(str(geo))
+        parts.extend(["圣地巡礼", "聖地巡礼", "舞台", "交通", "攻略", "拍照机位"])
+        return " ".join([p for p in parts if p])
+
+    def _contains_any(self, haystack: str, needles: List[str]) -> bool:
+        haystack = haystack.lower()
+        return any(needle.lower() in haystack for needle in needles if needle)
+
+    def _is_doc_relevant_to_landmark(self, landmark: Dict[str, Any], doc: Document, score: float = -1.0) -> bool:
+        meta = doc.metadata or {}
+        landmark_id = self._clean_text_value(landmark.get("id"))
+        if landmark_id and self._clean_text_value(meta.get("landmark_id")) == landmark_id:
+            return True
+
+        landmark_names = self._landmark_names(landmark)
+        meta_landmark = self._clean_text_value(meta.get("landmark_name"))
+
+        if meta_landmark and any(
+            meta_landmark.lower() in name.lower() or name.lower() in meta_landmark.lower()
+            for name in landmark_names
+        ):
+            return True
+
+        content = doc.page_content or ""
+        if self._contains_any(content, landmark_names):
+            return True
+
+        return False
+
+    def _doc_dedup_key(self, doc: Document) -> str:
+        meta = doc.metadata or {}
+        landmark_id = self._clean_text_value(meta.get("landmark_id"))
+        chunk_id = self._clean_text_value(meta.get("chunk_id"))
+        if landmark_id and chunk_id:
+            return f"{landmark_id}:{chunk_id}"
+        digest = hashlib.sha1((doc.page_content or "").encode("utf-8")).hexdigest()
+        return f"content:{digest}"
+
+    def _get_indexed_landmark_docs(self, landmark_id: str, limit: int) -> List[Document]:
+        if not landmark_id:
+            return []
+        try:
+            results = self.db.get(
+                where={"landmark_id": landmark_id},
+                include=["documents", "metadatas"],
+            )
+        except Exception as e:
+            logger.error(f"RAG-Service: direct landmark lookup failed for [{landmark_id}]: {e}")
+            return []
+
+        docs = []
+        documents = results.get("documents", []) or []
+        metadatas = results.get("metadatas", []) or []
+        for content, meta in zip(documents, metadatas):
+            if content:
+                docs.append(Document(page_content=content, metadata=meta or {}))
+            if len(docs) >= limit:
+                break
+        return docs
+
+    def _format_landmark_context(self, grouped_docs: List[Dict[str, Any]]) -> str:
+        blocks = []
+        for item in grouped_docs:
+            landmark = item["landmark"]
+            docs = item["docs"]
+            name = self._clean_text_value(landmark.get("name")) or self._clean_text_value(landmark.get("originalName")) or "未知"
+            bangumi_names = self._bangumi_names(landmark)
+            bangumi = bangumi_names[0] if bangumi_names else "未知"
+            doc_blocks = []
+            for doc_item in docs:
+                doc = doc_item["doc"]
+                score = doc_item["score"]
+                meta = doc.metadata or {}
+                ref_name = meta.get("landmark_name") or name
+                ref_bangumi = meta.get("bangumi") or bangumi
+                source = meta.get("source") or "RAG"
+                score_text = "vector" if score < 0 else f"{score}"
+                doc_blocks.append(
+                    f"【参考地标: {ref_name} (涉及作品:《{ref_bangumi}》, 来源: {source}, 评分: {score_text})】\n"
+                    f"{(doc.page_content or '').strip()}"
+                )
+            blocks.append(f"### {name} / {bangumi}\n" + "\n\n".join(doc_blocks))
+        return "\n\n".join(blocks)
+
+    def query_landmarks_context(
+        self,
+        landmarks: List[Dict[str, Any]],
+        per_landmark_k: int = 4,
+        per_landmark_limit: int = 2,
+        global_limit: int = 20,
+    ) -> Dict[str, Any]:
+        """
+        Run independent RAG recall for each landmark, then reduce duplicated chunks.
+        Returns formatted approved context plus per-landmark hit/miss lists.
+        """
+        missing_landmarks = []
+        candidate_groups = []
+        recall_details = []
+
+        for landmark in landmarks:
+            name = self._clean_text_value(landmark.get("name")) or self._clean_text_value(landmark.get("originalName"))
+            query = self._build_landmark_rag_query(landmark)
+            if not query:
+                missing_landmarks.append(landmark)
+                continue
+
+            try:
+                direct_docs = self._get_indexed_landmark_docs(
+                    self._clean_text_value(landmark.get("id")),
+                    per_landmark_k,
+                )
+                vector_docs = self.db.similarity_search(query, k=per_landmark_k)
+                raw_docs = []
+                raw_seen_keys = set()
+                for doc in direct_docs + vector_docs:
+                    dedup_key = self._doc_dedup_key(doc)
+                    if dedup_key in raw_seen_keys:
+                        continue
+                    raw_docs.append(doc)
+                    raw_seen_keys.add(dedup_key)
+            except Exception as e:
+                logger.error(f"RAG-Service: landmark recall failed for [{name}]: {e}")
+                raw_docs = []
+
+            if not raw_docs:
+                missing_landmarks.append(landmark)
+                recall_details.append({
+                    "landmark_id": landmark.get("id"),
+                    "landmark_name": name,
+                    "query": query,
+                    "recalled_count": 0,
+                    "selected_count": 0,
+                })
+                continue
+
+            scored_docs = self.reranker.rerank_with_scores(query, raw_docs)
+            candidates = []
+            local_seen_keys = set()
+            relevant_count = 0
+            for _, score, doc in scored_docs:
+                if not self._is_doc_relevant_to_landmark(landmark, doc, score):
+                    continue
+                relevant_count += 1
+                dedup_key = self._doc_dedup_key(doc)
+                if dedup_key in local_seen_keys:
+                    continue
+                candidates.append({"score": score, "doc": doc, "dedup_key": dedup_key})
+                local_seen_keys.add(dedup_key)
+                if len(candidates) >= per_landmark_limit:
+                    break
+
+            if candidates:
+                candidate_groups.append({
+                    "landmark": landmark,
+                    "name": name,
+                    "docs": [],
+                    "candidates": candidates,
+                    "relevant_count": relevant_count,
+                })
+            else:
+                missing_landmarks.append(landmark)
+
+            recall_details.append({
+                "landmark_id": landmark.get("id"),
+                "landmark_name": name,
+                "query": query,
+                "recalled_count": len(raw_docs),
+                "candidate_count": len(candidates),
+                "relevant_count": relevant_count,
+            })
+
+        seen_doc_keys = set()
+        total_selected = 0
+
+        # First pass: guarantee every hit landmark has at least one injected chunk.
+        for group in candidate_groups:
+            for candidate in group["candidates"]:
+                dedup_key = candidate["dedup_key"]
+                if dedup_key in seen_doc_keys:
+                    continue
+                group["docs"].append({"score": candidate["score"], "doc": candidate["doc"]})
+                seen_doc_keys.add(dedup_key)
+                total_selected += 1
+                break
+
+        # Extra passes: add second/third chunks only while staying within the global budget.
+        for desired_count in range(2, per_landmark_limit + 1):
+            if total_selected >= global_limit:
+                break
+            for group in candidate_groups:
+                if total_selected >= global_limit:
+                    break
+                if len(group["docs"]) >= desired_count:
+                    continue
+                for candidate in group["candidates"]:
+                    dedup_key = candidate["dedup_key"]
+                    if dedup_key in seen_doc_keys:
+                        continue
+                    group["docs"].append({"score": candidate["score"], "doc": candidate["doc"]})
+                    seen_doc_keys.add(dedup_key)
+                    total_selected += 1
+                    break
+
+        grouped_docs = []
+        hit_landmarks = []
+        for group in candidate_groups:
+            if not group["docs"]:
+                missing_landmarks.append(group["landmark"])
+                continue
+            grouped_docs.append({"landmark": group["landmark"], "docs": group["docs"]})
+            hit_landmarks.append({
+                "id": group["landmark"].get("id"),
+                "name": group["name"],
+                "chunks_count": len(group["docs"]),
+                "relevant_count": group["relevant_count"],
+            })
+
+        detail_by_id = {
+            item.get("landmark_id"): item
+            for item in recall_details
+            if item.get("landmark_id")
+        }
+        for group in candidate_groups:
+            detail = detail_by_id.get(group["landmark"].get("id"))
+            if detail is not None:
+                detail["selected_count"] = len(group["docs"])
+
+        context = self._format_landmark_context(grouped_docs)
+        log_rag_event("multi_recall", {
+            "landmarks_count": len(landmarks),
+            "hit_count": len(hit_landmarks),
+            "missing_count": len(missing_landmarks),
+            "selected_chunks_count": total_selected,
+            "details": recall_details,
+            "final_context": context,
+        })
+        logger.info(
+            "RAG-Service: multi-route recall complete. hits=%s missing=%s selected_chunks=%s",
+            len(hit_landmarks),
+            len(missing_landmarks),
+            total_selected,
+        )
+        return {
+            "context": context,
+            "hit_landmarks": hit_landmarks,
+            "missing_landmarks": missing_landmarks,
+        }
+
+    def _search_single_landmark(
+        self,
+        name: str,
+        bangumi: str,
+        original_name: str = "",
+        bangumi_original_name: str = "",
+    ) -> str:
         """
         联网搜索单个地标的长效攻略、圣地巡礼剧情以及交通状况，自动规避天气等易变词汇。
         包含智能防噪与内容过滤机制，拒绝 Git Diff 页面、不相关技术博客及 SEO 垃圾网页。
@@ -381,53 +677,97 @@ class RAGService:
             return ""
         
         # 严格限制在“长效背景知识”领域，规避瞬时信息
+        queries = []
         if bangumi and bangumi != "未知":
-            query = f"动漫《{bangumi}》 圣地巡礼 {name} 还原 剧情 交通 攻略"
+            queries.append(("中文", f"动漫《{bangumi}》 圣地巡礼 {name} 还原 剧情 交通 攻略"))
         else:
-            query = f"圣地巡礼 {name} 经典拍摄角度 交通 旅游攻略"
+            queries.append(("中文", f"圣地巡礼 {name} 经典拍摄角度 交通 旅游攻略"))
+
+        jp_name = original_name or name
+        jp_bangumi = bangumi_original_name or bangumi
+        if jp_name and (jp_name != name or (jp_bangumi and jp_bangumi != bangumi)):
+            if jp_bangumi and jp_bangumi != "未知":
+                queries.append(("日文", f"アニメ『{jp_bangumi}』 聖地巡礼 {jp_name} 舞台 場面 交通 攻略"))
+            else:
+                queries.append(("日文", f"聖地巡礼 {jp_name} 舞台 写真スポット 交通 攻略"))
+
+        query_map = dict(queries)
             
         try:
-            logger.info(f"RAG-Service: 正在对地标 [{name}] 进行长效背景知识检索... 查询词: {query}")
-            response = self.tavily_client.search(query=query, search_depth="basic", max_results=5)
+            include_domains = get_tavily_include_domains()
+            logger.info(
+                "RAG-Service: 正在对地标 [%s] 进行长效背景知识检索... 查询词: %s；白名单站点: %s",
+                name,
+                " | ".join([f"{label}: {query}" for label, query in queries]),
+                ", ".join(include_domains) if include_domains else "未限制",
+            )
+            with ThreadPoolExecutor(max_workers=min(len(query_map), 2)) as executor:
+                future_to_label = {
+                    executor.submit(
+                        self.tavily_client.search,
+                        query=query,
+                        **get_tavily_search_kwargs(search_depth="basic", max_results=5)
+                    ): label
+                    for label, query in queries
+                }
+                responses = []
+                for future in as_completed(future_to_label):
+                    label = future_to_label[future]
+                    try:
+                        responses.append((label, future.result()))
+                    except Exception as e:
+                        logger.warning(f"RAG-Service: {label}检索失败 [{name}]: {e}")
             
             contents = []
-            for item in response.get("results", []):
-                title = item.get("title", "")
-                url = item.get("url", "")
-                content = item.get("content", "")
-                
-                # 1. 过滤明显的文件/代码提交页面噪声（如 Hugging Face, GitHub Commits/Diffs 等）
-                url_lower = url.lower()
-                blacklist_patterns = [
-                    ".diff", ".patch", ".csv", ".xlsx", ".json", ".xml", ".txt",
-                    "/commit/", "/raw/", "/blob/", "huggingface.co/datasets", "github.com/commits"
-                ]
-                if any(pat in url_lower for pat in blacklist_patterns):
-                    logger.info(f"RAG-Service: 已跳过匹配黑名单 URL 的噪点网页: {url}")
-                    continue
-                
-                # 2. 过滤网页内容是 Git Diff 或代码结构的内容
-                content_lower = content.lower()
-                if "diff --git" in content_lower or "index " in content_lower or "+++ b/" in content_lower:
-                    logger.info(f"RAG-Service: 已跳过内容包含 Git Diff 的噪点网页: {url}")
-                    continue
+            seen_urls = set()
+            for label, response in responses:
+                for item in response.get("results", []):
+                    title = item.get("title", "")
+                    url = item.get("url", "")
+                    content = item.get("content", "")
+
+                    if url and url in seen_urls:
+                        continue
+                    if url:
+                        seen_urls.add(url)
+
+                    # 1. 过滤明显的文件/代码提交页面噪声（如 Hugging Face, GitHub Commits/Diffs 等）
+                    url_lower = url.lower()
+                    blacklist_patterns = [
+                        ".diff", ".patch", ".csv", ".xlsx", ".json", ".xml", ".txt",
+                        "/commit/", "/raw/", "/blob/", "huggingface.co/datasets", "github.com/commits"
+                    ]
+                    if any(pat in url_lower for pat in blacklist_patterns):
+                        logger.info(f"RAG-Service: 已跳过匹配黑名单 URL 的噪点网页: {url}")
+                        continue
                     
-                # 3. 过滤 SEO 垃圾广告或与动漫/地标/旅游完全不相关的噪音网页
-                # 必须包含地标/动漫名之一，或者包含基本的旅游/圣地巡礼关键词
-                keywords = [name.lower()]
-                if bangumi and bangumi != "未知":
-                    keywords.append(bangumi.lower())
-                
-                travel_keywords = ["巡礼", "圣地", "动漫", "打卡", "交通", "攻略", "站", "拍摄", "anime", "pilgrimage", "scene", "station", "route"]
-                
-                has_core_kw = any(kw in content_lower or kw in title.lower() for kw in keywords)
-                has_travel_kw = any(tkw in content_lower or tkw in title.lower() for tkw in travel_keywords)
-                
-                if not has_core_kw and not has_travel_kw:
-                    logger.info(f"RAG-Service: 已过滤不具备动漫/地标/旅游相关性的垃圾网页: {url}")
-                    continue
-                
-                contents.append(f"【来源网页: {title} ({url})】\n{content}\n")
+                    # 2. 过滤网页内容是 Git Diff 或代码结构的内容
+                    content_lower = content.lower()
+                    if "diff --git" in content_lower or "index " in content_lower or "+++ b/" in content_lower:
+                        logger.info(f"RAG-Service: 已跳过内容包含 Git Diff 的噪点网页: {url}")
+                        continue
+                        
+                    # 3. 过滤 SEO 垃圾广告或与动漫/地标/旅游完全不相关的噪音网页
+                    # 必须包含地标/动漫名之一，或者包含基本的旅游/圣地巡礼关键词
+                    keywords = [kw.lower() for kw in (name, original_name) if kw]
+                    if bangumi and bangumi != "未知":
+                        keywords.append(bangumi.lower())
+                    if bangumi_original_name and bangumi_original_name != "未知":
+                        keywords.append(bangumi_original_name.lower())
+                    
+                    travel_keywords = [
+                        "巡礼", "圣地", "聖地", "动漫", "アニメ", "舞台", "打卡", "交通", "攻略",
+                        "站", "駅", "拍摄", "撮影", "anime", "pilgrimage", "scene", "station", "route"
+                    ]
+                    
+                    has_core_kw = any(kw in content_lower or kw in title.lower() for kw in keywords)
+                    has_travel_kw = any(tkw in content_lower or tkw in title.lower() for tkw in travel_keywords)
+                    
+                    if not has_core_kw and not has_travel_kw:
+                        logger.info(f"RAG-Service: 已过滤不具备动漫/地标/旅游相关性的垃圾网页: {url}")
+                        continue
+                    
+                    contents.append(f"【{label}来源网页: {title} ({url})】\n{content}\n")
                 
             return "\n".join(contents)
         except Exception as e:
@@ -437,14 +777,16 @@ class RAGService:
     def ingest_landmarks(self, landmarks: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
         并发检索缺失的地标信息，递归切片并暂存至待审核队列（不直接写入 ChromaDB）。
-        返回暂存状态信息，供前端展示审核提示。
+        返回暂存状态信息和本次新检索文本，供前端展示审核提示，并供当前生成链路临时使用。
         """
         # 1. 过滤出在数据库中没有缓存记录、且不在待审核队列中的地标
         to_search = []
         for lm in landmarks:
             lm_id = lm.get("id")
             lm_name = lm.get("name")
+            original_name = lm.get("originalName") or ""
             bangumi = lm.get("bangumiName")
+            bangumi_original_name = lm.get("bangumiOriginalName") or ""
             
             if not lm_id or not lm_name:
                 continue
@@ -454,18 +796,24 @@ class RAGService:
             elif self.is_landmark_pending(lm_id):
                 logger.info(f"RAG-Service: 地标 [{lm_name}] (ID: {lm_id}) 已在待审核队列中，跳过联网检索。")
             else:
-                to_search.append((lm_id, lm_name, bangumi))
+                to_search.append((lm_id, lm_name, bangumi, original_name, bangumi_original_name))
                 
         if not to_search:
             logger.info("RAG-Service: 所有地标均已缓存或待审核，无需进行额外联网检索。")
-            return {"pending_count": 0, "pending_landmarks": []}
+            return {"pending_count": 0, "pending_landmarks": [], "search_context": ""}
 
         # 2. 并发对需要抓取的地标进行联网检索
         results_to_stage = []
         with ThreadPoolExecutor(max_workers=min(len(to_search), 5)) as executor:
             future_to_lm = {
-                executor.submit(self._search_single_landmark, name, bangumi): (lm_id, name, bangumi)
-                for lm_id, name, bangumi in to_search
+                executor.submit(
+                    self._search_single_landmark,
+                    name,
+                    bangumi,
+                    original_name,
+                    bangumi_original_name
+                ): (lm_id, name, bangumi)
+                for lm_id, name, bangumi, original_name, bangumi_original_name in to_search
             }
             
             for future in as_completed(future_to_lm):
@@ -480,7 +828,7 @@ class RAGService:
         # 3. 递归切片并暂存至待审核队列（不直接写入 ChromaDB）
         if not results_to_stage:
             logger.warning("RAG-Service: 未获取到有效的联网检索内容，本次不进行暂存。")
-            return {"pending_count": 0, "pending_landmarks": []}
+            return {"pending_count": 0, "pending_landmarks": [], "search_context": ""}
             
         splitter = RecursiveCharacterTextSplitter(chunk_size=600, chunk_overlap=60)
         pending_landmarks = []
@@ -492,7 +840,7 @@ class RAGService:
             # 提取来源 URL
             sources = []
             for line in text.split("\n"):
-                if line.startswith("【来源网页:") and "(" in line and ")" in line:
+                if line.startswith("【") and "来源网页:" in line and "(" in line and ")" in line:
                     url_start = line.rfind("(")
                     url_end = line.rfind(")")
                     if url_start < url_end:
@@ -500,8 +848,16 @@ class RAGService:
             
             self.add_to_pending(lm_id, name, bangumi or "未知", text, chunks, sources)
             pending_landmarks.append({"id": lm_id, "name": name, "chunks_count": len(chunks)})
-
-        return {"pending_count": len(pending_landmarks), "pending_landmarks": pending_landmarks}
+            
+        search_context = "\n\n".join(
+            f"### {name} / {bangumi or '未知'}\n{text}"
+            for _, name, bangumi, text in results_to_stage
+        )
+        return {
+            "pending_count": len(pending_landmarks),
+            "pending_landmarks": pending_landmarks,
+            "search_context": search_context,
+        }
 
     def query_rag_context(self, query: str, k: int = 6) -> str:
         """

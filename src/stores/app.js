@@ -273,6 +273,7 @@ export const useAppStore = defineStore('app', () => {
       originURL: point.originURL || '',
       bangumiId: bangumi.value ? bangumi.value.id : null,
       bangumiName: (bangumi.value && (bangumi.value.cn || bangumi.value.title)) || '',
+      bangumiOriginalName: (bangumi.value && bangumi.value.title) || '',
       checked: true
     })
   }

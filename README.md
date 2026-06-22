@@ -118,6 +118,8 @@ VITE_ARK_MODEL=
 # 后端 Agent 模式所需
 DEEPSEEK_API_KEY=your_deepseek_api_key
 TAVILY_API_KEY=your_tavily_api_key
+TAVILY_INCLUDE_DOMAINS=anitabi.cn,bgm.tv,bangumi.tv,animetourism88.com,anime-tourism.jp,seichimap.jp,ja.wikipedia.org,zh.wikipedia.org,japan-guide.com
+TAVILY_EXCLUDE_DOMAINS=github.com,huggingface.co,kaggle.com,medium.com,csdn.net,jianshu.com
 
 # MiMo 视觉模型 — Agent 模式中分析动漫截图时使用
 MIMO_API_KEY=your_mimo_api_key_here

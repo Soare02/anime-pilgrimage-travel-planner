@@ -530,10 +530,11 @@ async function loadHistoryDetail(record) {
         fetchBangumiPointsDetail(bangumiId, true)
       ])
       const bangumiName = liteData.cn || liteData.title || ''
+      const bangumiOriginalName = liteData.title || ''
       pointIds.forEach(pid => {
         const p = detailData.find(d => d.id === pid)
         if (p) {
-          landmarkList.push({ ...p, bangumiName, bangumiId })
+          landmarkList.push({ ...p, bangumiName, bangumiOriginalName, bangumiId })
         } else {
           missedCount++  // API 返回了但未找到该 point（可能被移除）
         }
@@ -568,6 +569,7 @@ function handleHistoryLandmarkClick(pt) {
     originURL: pt.originURL || '',
     bangumiId: pt.bangumiId || null,
     bangumiName: pt.bangumiName || '',
+    bangumiOriginalName: pt.bangumiOriginalName || '',
     checked: true
   })
   ElMessage.success('已添加到坐标库')

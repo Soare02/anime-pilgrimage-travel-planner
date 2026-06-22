@@ -76,8 +76,9 @@ export async function generateAIRoute(days, landmarks, aiConfig, onChunk) {
             name: lm.name,
             originalName: lm.originalName || '',
             bangumiName: lm.bangumiName || '',
+            bangumiOriginalName: lm.bangumiOriginalName || '',
             ep: lm.ep != null ? String(lm.ep) : '',
-            s: lm.s || null,
+            s: lm.s ?? null,
             geo: lm.geo || null,
             image: lm.image || null
           }))
@@ -118,6 +119,8 @@ export async function generateAIRoute(days, landmarks, aiConfig, onChunk) {
   const landmarkLines = landmarks.map((lm, i) => {
     const parts = [`${i + 1}. 地点名称：${lm.name || lm.originalName || '未知'}`]
     parts.push(`   作品名称：${lm.bangumiName || '未知'}`)
+    if (lm.originalName && lm.originalName !== lm.name) parts.push(`   日文地点名：${lm.originalName}`)
+    if (lm.bangumiOriginalName && lm.bangumiOriginalName !== lm.bangumiName) parts.push(`   日文作品名：${lm.bangumiOriginalName}`)
     if (lm.ep) parts.push(`   出现集数：EP${lm.ep}`)
     if (lm.s || lm.s === 0) parts.push(`   时间戳：${formatTimestamp(lm.s)}`)
     if (lm.geo) parts.push(`   坐标：${lm.geo[0]}, ${lm.geo[1]}`)

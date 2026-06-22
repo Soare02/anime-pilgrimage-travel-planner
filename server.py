@@ -24,6 +24,7 @@ class Landmark(BaseModel):
     name: str
     originalName: Optional[str] = None
     bangumiName: Optional[str] = None
+    bangumiOriginalName: Optional[str] = None
     ep: Optional[str] = None
     s: Optional[float] = None
     geo: Optional[List[float]] = None
@@ -59,32 +60,37 @@ def format_timestamp(seconds: float) -> str:
 @app.post("/api/agent/plan")
 def plan_route_endpoint(req: PlanRequest):
     try:
-        # 1. 提取地标信息并利用 RAG 进行增量并发联网检索及入库
+        # 1. 提取地标信息，准备 RAG 查询与必要的联网补全
         landmarks_data = []
         for lm in req.landmarks:
             landmarks_data.append({
                 "id": lm.id,
                 "name": lm.name,
-                "bangumiName": lm.bangumiName or "未知"
+                "originalName": lm.originalName or "",
+                "bangumiName": lm.bangumiName or "未知",
+                "bangumiOriginalName": lm.bangumiOriginalName or "",
+                "geo": lm.geo or None
             })
-        
-        # 触发增量联网与切片入库
-        ingest_result = rag_service.ingest_landmarks(landmarks_data)
+
+        # 2. 逐地标查询已审核入库的 RAG 内容，再聚合去重
+        rag_result = rag_service.query_landmarks_context(landmarks_data)
+        rag_context = rag_result.get("context", "") if rag_result else ""
+        missing_landmarks = rag_result.get("missing_landmarks", landmarks_data) if rag_result else landmarks_data
+
+        # 3. 仅对 RAG 未命中的地标做 Tavily 联网补全：本次生成临时使用，同时进入 RAG 审核区
+        ingest_result = rag_service.ingest_landmarks(missing_landmarks)
         pending_count = ingest_result.get("pending_count", 0) if ingest_result else 0
+        tavily_context = ingest_result.get("search_context", "") if ingest_result else ""
 
-        # 2. 构建检索查询词并获取 RAG 召回内容
-        unique_bangumis = list(set([lm.bangumiName for lm in req.landmarks if lm.bangumiName and lm.bangumiName != "未知"]))
-        landmark_names = [lm.name for lm in req.landmarks if lm.name]
-        rag_query = " ".join(unique_bangumis + landmark_names)
-        
-        # 召回与重排最优上下文
-        rag_context = rag_service.query_rag_context(rag_query)
-
-        # 3. 格式化地标数据，拼装为 Agent 能够理解的文本 prompt
+        # 4. 格式化地标数据，拼装为 Agent 能够理解的文本 prompt
         landmark_lines = []
         for i, lm in enumerate(req.landmarks):
             parts = [f"{i + 1}. 地点名称：{lm.name or lm.originalName or '未知'}"]
             parts.append(f"   作品名称：{lm.bangumiName or '未知'}")
+            if lm.originalName and lm.originalName != lm.name:
+                parts.append(f"   日文地点名：{lm.originalName}")
+            if lm.bangumiOriginalName and lm.bangumiOriginalName != lm.bangumiName:
+                parts.append(f"   日文作品名：{lm.bangumiOriginalName}")
             if lm.ep:
                 parts.append(f"   出现集数：EP{lm.ep}")
             if lm.s is not None:
@@ -97,17 +103,24 @@ def plan_route_endpoint(req: PlanRequest):
         
         data_text = f"巡礼天数：{req.days}天\n\n需要访问的地标（共{len(req.landmarks)}个）：\n" + "\n\n".join(landmark_lines)
 
-        # 注入 RAG 上下文
+        # 注入已审核 RAG 上下文与本次 Tavily 补充上下文
+        context_sections = []
         if rag_context:
+            context_sections.append("### 已审核 RAG 内容\n" + rag_context)
+        if tavily_context:
+            context_sections.append("### 本次联网检索补充内容（待审核入库）\n" + tavily_context)
+
+        if context_sections:
             data_text = (
                 "## 检索到的巡礼背景与攻略知识 (RAG Context)\n"
-                f"{rag_context}\n\n"
+                + "\n\n".join(context_sections)
+                + "\n\n"
                 "--------------------------------------------------\n"
                 "## 用户规划任务请求\n"
                 f"{data_text}"
             )
 
-        # 4. 定义流式生成器函数
+        # 5. 定义流式生成器函数
         # 使用同步生成器配合同步 endpoint，FastAPI 会自动在独立的线程池中迭代它，避免阻塞主事件循环
         def event_generator():
             try:

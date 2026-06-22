@@ -1,11 +1,13 @@
 import os
 import re
 import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dotenv import load_dotenv
 import requests
 from langchain.tools import tool
 from tavily import TavilyClient
 from openai import OpenAI
+from tavily_config import get_tavily_search_kwargs
 load_dotenv()
 
 # MiMo 视觉分析返回值哨兵常量（供 agent.py 跨模块复用，避免硬编码字符串）
@@ -89,7 +91,10 @@ def get_attraction(city: str, weather: str) -> str:
     
     try:
         # 4. 调用API，include_answer=True会返回一个综合性的回答
-        response = tavily.search(query=query, search_depth="basic", include_answer=True)
+        response = tavily.search(
+            query=query,
+            **get_tavily_search_kwargs(search_depth="basic", include_answer=True)
+        )
         
         # 5. Tavily返回的结果已经非常干净，可以直接使用
         # response['answer'] 是一个基于所有搜索结果的总结性回答
@@ -110,7 +115,14 @@ def get_attraction(city: str, weather: str) -> str:
         return f"错误:执行Tavily搜索时出现问题 - {e}"
     
 @tool
-def get_anime_scene(anime_title: str, episode: str, location_name: str, timestamp: str = "") -> str:
+def get_anime_scene(
+    anime_title: str,
+    episode: str,
+    location_name: str,
+    timestamp: str = "",
+    anime_title_ja: str = "",
+    location_name_ja: str = "",
+) -> str:
     """
     查询动漫中某个特定场景的剧情细节、时间氛围和情节内容。
     模型可根据返回的场景信息（如黄昏、夜晚、雨天等氛围）调整巡礼路线的时间安排。
@@ -120,6 +132,8 @@ def get_anime_scene(anime_title: str, episode: str, location_name: str, timestam
         episode: 集数，如"EP1"、"第3集"
         location_name: 地点名称，如"宇治桥"、"大吉山展望台"
         timestamp: 时间戳，如"0:25"、"11:45"
+        anime_title_ja: 作品日文原名
+        location_name_ja: 地点日文原名
     """
     api_key = os.getenv("TAVILY_API_KEY")
     if not api_key:
@@ -129,19 +143,52 @@ def get_anime_scene(anime_title: str, episode: str, location_name: str, timestam
     if timestamp:
         parts.append(f"第{timestamp}左右的剧情")
     parts.append("场景描写 时间 氛围 情节")
-    query = " ".join(parts)
+    queries = [("中文", " ".join(parts))]
+
+    jp_title = anime_title_ja or anime_title
+    jp_location = location_name_ja or location_name
+    if jp_title != anime_title or jp_location != location_name:
+        jp_parts = [f"アニメ『{jp_title}』", episode, jp_location]
+        if timestamp:
+            jp_parts.append(f"{timestamp} 頃の場面")
+        jp_parts.append("聖地巡礼 舞台 場面 雰囲気 情景")
+        queries.append(("日文", " ".join(jp_parts)))
 
     tavily = TavilyClient(api_key=api_key)
 
     try:
-        response = tavily.search(query=query, search_depth="basic", include_answer=True)
-
-        if response.get("answer"):
-            return response["answer"]
+        responses = []
+        with ThreadPoolExecutor(max_workers=min(len(queries), 2)) as executor:
+            future_to_label = {
+                executor.submit(
+                    tavily.search,
+                    query=query,
+                    **get_tavily_search_kwargs(search_depth="basic", include_answer=True)
+                ): label
+                for label, query in queries
+            }
+            for future in as_completed(future_to_label):
+                label = future_to_label[future]
+                try:
+                    responses.append((label, future.result()))
+                except Exception as e:
+                    responses.append((label, {"results": [], "_error": str(e)}))
 
         formatted_results = []
-        for result in response.get("results", []):
-            formatted_results.append(f"- {result['title']}: {result['content']}")
+        seen_urls = set()
+        for label, response in responses:
+            if response.get("answer"):
+                formatted_results.append(f"【{label}综合回答】{response['answer']}")
+
+            for result in response.get("results", []):
+                url = result.get("url", "")
+                if url and url in seen_urls:
+                    continue
+                if url:
+                    seen_urls.add(url)
+                formatted_results.append(
+                    f"- 【{label}来源】{result.get('title', '')}: {result.get('content', '')}"
+                )
 
         if not formatted_results:
             return f"未找到《{anime_title}》{episode}中{location_name}的相关场景信息。"
