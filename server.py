@@ -7,6 +7,7 @@ from pydantic import BaseModel, field_validator
 from typing import List, Optional
 from agent import agent
 from rag_service import rag_service
+import agent_trace
 
 app = FastAPI(title="Anime Pilgrimage Travel Planner Agent Server")
 
@@ -122,8 +123,18 @@ def plan_route_endpoint(req: PlanRequest):
 
         # 5. 定义流式生成器函数
         # 使用同步生成器配合同步 endpoint，FastAPI 会自动在独立的线程池中迭代它，避免阻塞主事件循环
+        # 在生成器内部启动 / 结束 trace —— 因为 agent.invoke 在 worker 线程里执行，
+        # 需要把 run_id 通过 ContextVar 暴露给 agent.py 里的所有 traced 调用。
+        run_id = agent_trace.start_run(
+            days=req.days,
+            landmark_names=[lm.name for lm in req.landmarks],
+        )
+
         def event_generator():
+            ended = False
             try:
+                # 把 run_id 重新 attach 到这个生成器迭代线程（FastAPI 在线程池里跑同步生成器）
+                agent_trace.attach_run(run_id)
                 stream_result = agent.stream(
                     {"messages": [{"role": "user", "content": data_text}]},
                     config={"recursion_limit": 15},
@@ -132,12 +143,23 @@ def plan_route_endpoint(req: PlanRequest):
                 for chunk, metadata in stream_result:
                     if chunk.content:
                         yield chunk.content
+                agent_trace.end_run(status="success")
+                ended = True
             except Exception as e:
                 print(f"[plan_route_endpoint] pipeline exception: {traceback.format_exc()}")
+                agent_trace.attach_run(run_id)
+                agent_trace.end_run(status="error", error=str(e))
+                ended = True
                 yield f"\n__ERROR__:{str(e)}\n"
+            finally:
+                # 客户端断开 / GeneratorExit 时也强制结束 trace（避免一直停在 running 状态）
+                if not ended:
+                    agent_trace.attach_run(run_id)
+                    agent_trace.end_run(status="aborted", error="generator closed before finish")
 
         response = StreamingResponse(event_generator(), media_type="text/plain")
         response.headers["X-RAG-Pending-Count"] = str(pending_count)
+        response.headers["X-Agent-Run-Id"] = run_id
         return response
 
     except Exception as e:
@@ -309,6 +331,41 @@ def get_landmark_chunks_endpoint(landmark_id: str):
                 "metadata": results["metadatas"][i] if results.get("metadatas") else {}
             })
         return chunks
+    except Exception as e:
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail='服务器内部错误')
+
+# ---------------- Agent 调试追踪相关端点 ----------------
+
+@app.get("/api/agent/traces")
+def list_agent_traces_endpoint():
+    """列出最近的 agent 运行（摘要，不含 steps）"""
+    try:
+        return agent_trace.list_traces()
+    except Exception as e:
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail='服务器内部错误')
+
+@app.get("/api/agent/trace/{run_id}")
+def get_agent_trace_endpoint(run_id: str):
+    """获取指定 run 的完整 trace（包含所有 LLM/工具步骤）"""
+    try:
+        trace = agent_trace.get_trace(run_id)
+        if not trace:
+            raise HTTPException(status_code=404, detail=f"未找到 run_id={run_id} 的追踪记录")
+        return trace
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail='服务器内部错误')
+
+@app.post("/api/agent/traces/clear")
+def clear_agent_traces_endpoint():
+    """清空所有 agent 追踪记录"""
+    try:
+        agent_trace.clear_traces()
+        return {"status": "success", "message": "Agent 追踪记录已清空"}
     except Exception as e:
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail='服务器内部错误')

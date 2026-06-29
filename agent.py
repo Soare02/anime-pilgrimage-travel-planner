@@ -2,6 +2,7 @@ import os
 import re
 import json
 import queue
+import logging
 import threading
 import operator
 from concurrent.futures import ThreadPoolExecutor
@@ -21,8 +22,11 @@ from tools import (
     MIMO_SECTION_HEADER,
     MIMO_NO_KEY_SUFFIX,
 )
+import agent_trace
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 # Initialize DeepSeek Chat Model
 llm_deepseek = init_chat_model(
@@ -107,13 +111,17 @@ ROUTING_PROMPT = """
       "route_sequence": ["起点站", "地标1名称", "地标2名称", "返程站"],
       "transit_details": "详细的每日交通衔接描述，包含乘坐的铁路线、巴士、步行距离估算等",
       "landmarks": [
-        # 按游览顺序排列的地标对象列表。必须保留输入中该地标的全部字段（包括 image, geo, final_info, ep 等），可额外添加 "visit_order" 字段
+        {{ "name": "地标名", "visit_order": 1, "geo": [0,0], "image": "", "final_info": "", "ep": "", "bangumi": "" }}
       ]
     }}
   ]
 }}
 
-请务必只返回 JSON 块，并用 ```json 和 ``` 包裹。
+【严格输出规范】
+- 输出必须是严格合法的 JSON，禁止任何注释（不允许 # 或 //），禁止任何示意性占位字符（如「...」「省略」）。
+- landmarks 数组必须保留输入中每个地标的全部字段（name, geo, image, final_info, ep, bangumi 等），并按游览顺序排列；如必要可额外加 visit_order。
+- 即使输入地标信息不完整，也必须给出 days 数组（不可为空），把所有地标都分配到某一天里。
+- 必须用 ```json 和 ``` 包裹 JSON。
 """
 
 ANIME_EXPERT_PROMPT = """
@@ -231,23 +239,48 @@ EDITOR_FORMATTING_PROMPT = """
 
 # Helper to parse json block
 def parse_json_block(text: str) -> Dict[str, Any]:
-    match = re.search(r"```json\s*(.*?)\s*```", text, re.DOTALL)
+    # 预处理：剥离 # 行注释（LLM 经常照抄 prompt 示范里的注释）
+    # 注意：不要剥离 // 行注释 —— 会误伤 URL 里的 https://
+    cleaned = re.sub(r"(?m)^\s*#.*$", "", text)
+    match = re.search(r"```json\s*(.*?)\s*```", cleaned, re.DOTALL)
     if match:
         try:
             return json.loads(match.group(1).strip())
         except Exception:
             pass
     try:
-        return json.loads(text.strip())
+        return json.loads(cleaned.strip())
     except Exception:
-        start = text.find("{")
-        end = text.rfind("}")
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
         if start != -1 and end != -1:
             try:
-                return json.loads(text[start:end+1])
+                return json.loads(cleaned[start:end+1])
             except Exception:
                 pass
     return {}
+
+
+def traced_llm_invoke(node: str, label: str, prompt: str) -> str:
+    """统一封装 llm_deepseek.invoke，自动把输入/输出写入 agent_trace。"""
+    response = llm_deepseek.invoke(prompt)
+    content = response.content if hasattr(response, "content") else str(response)
+    agent_trace.record_llm_call(node=node, label=label, prompt=prompt, response=content)
+    return content
+
+
+def traced_tool_call(node: str, tool_name: str, func, **kwargs) -> Any:
+    """统一封装工具调用，自动把参数/结果（或异常）写入 agent_trace。"""
+    try:
+        result = func(**kwargs)
+        agent_trace.record_tool_call(node=node, tool_name=tool_name, args=kwargs, result=result)
+        return result
+    except Exception as e:
+        agent_trace.record_tool_call(
+            node=node, tool_name=tool_name, args=kwargs,
+            result=None, error=str(e),
+        )
+        raise
 
 
 def parse_landmark_aliases(text: str) -> Dict[str, Dict[str, str]]:
@@ -274,14 +307,17 @@ def parse_landmark_aliases(text: str) -> Dict[str, Dict[str, str]]:
 # 视觉分析 helper：封装 调用 MiMo → 检查哨兵 → 拼接 final_info → 置 vision_analyzed
 # 供 info_retriever_node 与 anime_expert_node 复用（避免 DRY）。
 # 返回 (是否成功分析, 是否因未配置key而跳过)，供调用方决定状态回调。
-def apply_vision_analysis(lm: Dict[str, Any], name: str, bangumi: str, image_url: str) -> tuple:
+def apply_vision_analysis(lm: Dict[str, Any], name: str, bangumi: str, image_url: str, node: str = "info_retriever") -> tuple:
     existing_info = lm.get("final_info", "") or ""
     try:
-        vision_result = analyze_anime_scene_image(
+        vision_result = traced_tool_call(
+            node=node,
+            tool_name="analyze_anime_scene_image (MiMo Vision)",
+            func=analyze_anime_scene_image,
             image_url=image_url,
             location_name=name,
             anime_title=bangumi or "",
-            extra_context=existing_info[:500]
+            extra_context=existing_info[:500],
         )
     except Exception:
         return (False, False)
@@ -311,19 +347,21 @@ class AgentState(TypedDict):
     revision_count: int
 
 def info_retriever_node(state: AgentState, config=None) -> Dict[str, Any]:
+    agent_trace.record_node_start("info_retriever", "解析输入、RAG/Tavily 补全与 MiMo 视觉分析")
     callback = config.get("configurable", {}).get("on_chunk_callback") if config else None
     if callback:
         callback("__STATUS__:正在进行信息检索与验证...\n")
-        
+        agent_trace.record_status("info_retriever", "正在进行信息检索与验证...")
+
     msg = state["messages"][-1]
     if isinstance(msg, dict):
         user_message = msg.get("content", "")
     else:
         user_message = getattr(msg, "content", str(msg))
-    
+
     # Parse input text to structured landmarks and days
     parse_prompt = PARSER_PROMPT.format(data_text=user_message)
-    parser_res = llm_deepseek.invoke(parse_prompt).content
+    parser_res = traced_llm_invoke("info_retriever", "PARSER (解析地标列表)", parse_prompt)
     data = parse_json_block(parser_res)
     
     days = data.get("days", 1)
@@ -332,6 +370,8 @@ def info_retriever_node(state: AgentState, config=None) -> Dict[str, Any]:
     
     # M6: validate parsed result
     if not landmarks:
+        # 诊断：把 LLM 原始返回打到终端
+        logger.error("PARSER RAW (landmarks empty) ===\n%s\n=== END", parser_res)
         if callback:
             callback("__STATUS__:警告 — LLM 解析地标列表为空，请检查输入或重试\n")
         raise RuntimeError("解析地标失败：LLM 返回的 landmarks 为空，请重新生成路线")
@@ -340,9 +380,12 @@ def info_retriever_node(state: AgentState, config=None) -> Dict[str, Any]:
     completed_landmarks = [None] * total  # 预分配，保持顺序
     # M5: 全局标记——仅首次发现未配置 key 时发状态回调，避免 N 次重复
     mimo_no_key_warned = False
+    parent_run_id = agent_trace.get_current_run_id()
 
     def process_landmark(idx, lm):
         """处理单个 landmark（RAG/Tavily + MiMo），在 worker 线程中执行。"""
+        # 子线程需要显式 attach 当前 run_id，否则 ContextVar 默认值为 None，追踪丢失
+        agent_trace.attach_run(parent_run_id)
         name = lm.get("name")
         bangumi = lm.get("bangumi") or ""
         aliases = landmark_aliases.get(name, {})
@@ -366,17 +409,24 @@ def info_retriever_node(state: AgentState, config=None) -> Dict[str, Any]:
                 lm["final_info"] = "未提供作品名称，跳过场景检索"
                 lm["source"] = "None (No bangumi)"
             else:
-                search_res = get_anime_scene.func(
+                search_res = traced_tool_call(
+                    node="info_retriever",
+                    tool_name="get_anime_scene (Tavily)",
+                    func=get_anime_scene.func,
                     anime_title=bangumi, episode=ep,
                     location_name=name, timestamp=timestamp,
                     anime_title_ja=bangumi_original_name,
-                    location_name_ja=original_name
+                    location_name_ja=original_name,
                 )
                 val_prompt = RELEVANCE_CHECK_PROMPT.format(
                     name=name, bangumi=bangumi, ep=ep,
                     timestamp=timestamp, search_result=search_res
                 )
-                val_res = llm_deepseek.invoke(val_prompt).content
+                val_res = traced_llm_invoke(
+                    "info_retriever",
+                    f"RELEVANCE_CHECK ({name})",
+                    val_prompt,
+                )
                 val_data = parse_json_block(val_res)
                 if val_data.get("relevant", False):
                     lm["final_info"] = val_data.get("extracted_details") or search_res
@@ -388,7 +438,7 @@ def info_retriever_node(state: AgentState, config=None) -> Dict[str, Any]:
         # MiMo 视觉分析
         image_url = lm.get("image")
         if image_url and name and bangumi:
-            ok, no_key = apply_vision_analysis(lm, name, bangumi, image_url)
+            ok, no_key = apply_vision_analysis(lm, name, bangumi, image_url, node="info_retriever")
             nonlocal mimo_no_key_warned
             if no_key and not mimo_no_key_warned:
                 mimo_no_key_warned = True
@@ -408,6 +458,7 @@ def info_retriever_node(state: AgentState, config=None) -> Dict[str, Any]:
             if callback and name:
                 callback(f"__STATUS__:已完成检索与验证: {name} ({idx+1}/{len(landmarks)})\n")
 
+    agent_trace.record_node_end("info_retriever", f"完成 {len(landmarks)} 个地标的检索 (days={days})")
     return {
         "days": days,
         "completed_landmarks": completed_landmarks,
@@ -415,41 +466,51 @@ def info_retriever_node(state: AgentState, config=None) -> Dict[str, Any]:
     }
 
 def routing_specialist_node(state: AgentState, config=None) -> Dict[str, Any]:
+    agent_trace.record_node_start("routing_specialist", "按地理区域与天气划分天数")
     callback = config.get("configurable", {}).get("on_chunk_callback") if config else None
     if callback:
         callback("__STATUS__:正在根据地理区域和天气进行路线规划...\n")
-        
+        agent_trace.record_status("routing_specialist", "正在根据地理区域和天气进行路线规划...")
+
     landmarks = state["completed_landmarks"]
     days = state["days"]
     errors = state.get("errors", [])
-    
+
     # 1. Determine city for weather
     lm_names = [lm.get("name") for lm in landmarks]
     city_prompt = f"Based on these landmark names, identify the main city in Japan (e.g., 'Kyoto', 'Tokyo', 'Uji', 'Yokohama') where these locations are situated. Output only the city name.\nLandmarks: {lm_names}"
-    city = llm_deepseek.invoke(city_prompt).content.strip().split("\n")[-1].strip(" '\"`*.")
-    
+    city_res = traced_llm_invoke("routing_specialist", "CITY_DETECT (识别主城市)", city_prompt)
+    city = city_res.strip().split("\n")[-1].strip(" '\"`*.")
+
     # 2. Get weather info
     try:
-        weather_info = get_weather.func(city=city)
+        weather_info = traced_tool_call(
+            node="routing_specialist",
+            tool_name="get_weather (wttr.in)",
+            func=get_weather.func,
+            city=city,
+        )
     except Exception:
         weather_info = "无法获取天气"
-        
+
     # 3. Generate routing draft
     landmarks_json = json.dumps(landmarks, ensure_ascii=False, indent=2)
     errors_text = "\n".join([f"- {err}" for err in errors]) if errors else "无"
-    
+
     prompt = ROUTING_PROMPT.format(
         days=days,
         weather_info=weather_info,
         landmarks_json=landmarks_json,
         errors_text=errors_text
     )
-    
-    res = llm_deepseek.invoke(prompt).content
+
+    res = traced_llm_invoke("routing_specialist", "ROUTING (路由划分)", prompt)
     routing_draft = parse_json_block(res)
 
     # M6: validate routing result
     if not routing_draft.get("days"):
+        # 诊断输出：把 LLM 原始返回打到终端，方便定位问题
+        logger.error("ROUTING RAW (parsed empty) ===\n%s\n=== END", res)
         if callback:
             callback("__STATUS__:警告 — 路由规划失败，请重试或减少地标数量\n")
         raise RuntimeError("路由规划失败：LLM 返回的 routing_draft.days 为空")
@@ -468,14 +529,17 @@ def routing_specialist_node(state: AgentState, config=None) -> Dict[str, Any]:
                     if key in ref and not lm.get(key):
                         lm[key] = ref[key]
 
+    agent_trace.record_node_end("routing_specialist", f"已生成 routing_draft (days={len(routing_draft.get('days', []))})")
     return {
         "routing_draft": routing_draft
     }
 
 def anime_expert_node(state: AgentState, config=None) -> Dict[str, Any]:
+    agent_trace.record_node_start("anime_expert", "注入名场面氛围与拍照指南")
     callback = config.get("configurable", {}).get("on_chunk_callback") if config else None
     if callback:
         callback("__STATUS__:正在匹配动漫原作场景时段与拍照建议...\n")
+        agent_trace.record_status("anime_expert", "正在匹配动漫原作场景时段与拍照建议...")
 
     routing_draft = state["routing_draft"]
 
@@ -491,7 +555,7 @@ def anime_expert_node(state: AgentState, config=None) -> Dict[str, Any]:
                 continue
             # 兜底：M2 中 lookup 按 name 匹配未命中时，lm 没有 vision_analyzed 标记
             bangumi = lm.get("bangumi") or ""
-            ok, no_key = apply_vision_analysis(lm, lm_name, bangumi, image_url)
+            ok, no_key = apply_vision_analysis(lm, lm_name, bangumi, image_url, node="anime_expert")
             if ok and callback:
                 callback(f"__STATUS__:MiMo视觉分析(兜底): {lm_name}...\n")
 
@@ -500,56 +564,69 @@ def anime_expert_node(state: AgentState, config=None) -> Dict[str, Any]:
         routing_draft_json=json.dumps(routing_draft, ensure_ascii=False, indent=2)
     )
 
-    res = llm_deepseek.invoke(prompt).content
+    res = traced_llm_invoke("anime_expert", "ANIME_EXPERT (拍照指南润色)", prompt)
     refined_itinerary = parse_json_block(res)
 
+    agent_trace.record_node_end("anime_expert", f"已生成 refined_itinerary (days={len(refined_itinerary.get('days', []))})")
     return {
         "refined_itinerary": refined_itinerary
     }
 
 def supervisor_editor_node(state: AgentState, config=None) -> Dict[str, Any]:
+    agent_trace.record_node_start("supervisor_editor", "审查路线 + 生成 Markdown")
     callback = config.get("configurable", {}).get("on_chunk_callback") if config else None
     raw_landmarks = state["raw_landmarks"]
     refined_itinerary = state["refined_itinerary"]
     revision_count = state.get("revision_count", 0)
-    
+
     if callback:
         if revision_count > 0:
             callback(f"__STATUS__:正在进行路线合理性审查与微调 (第 {revision_count} 次修正)...\n")
         else:
             callback("__STATUS__:正在进行路线合理性审查与微调...\n")
-    
+        agent_trace.record_status("supervisor_editor", f"路线合理性审查 (修正次数={revision_count})")
+
     val_prompt = SUPERVISOR_VALIDATION_PROMPT.format(
         raw_landmarks_json=json.dumps(raw_landmarks, ensure_ascii=False),
         refined_itinerary_json=json.dumps(refined_itinerary, ensure_ascii=False)
     )
-    val_res = llm_deepseek.invoke(val_prompt).content
+    val_res = traced_llm_invoke("supervisor_editor", f"SUPERVISOR_VALIDATION (审核 #{revision_count})", val_prompt)
     val_data = parse_json_block(val_res)
-    
+
     is_valid = val_data.get("is_valid", False)
     errors = val_data.get("errors", [])
     walking_distances = val_data.get("walking_distances", {})
-    
+
     if not is_valid and revision_count < 3:
+        agent_trace.record_node_end("supervisor_editor", f"审核未通过，回到 routing_specialist (errors={len(errors)})")
         return {
             "errors": errors,
             "revision_count": revision_count + 1
         }
-    
+
     # Validation passed or maximum revisions reached, format final output
     fmt_prompt = EDITOR_FORMATTING_PROMPT.format(
         refined_itinerary_json=json.dumps(refined_itinerary, ensure_ascii=False, indent=2),
         walking_distances_json=json.dumps(walking_distances, ensure_ascii=False)
     )
-    
+
     callback = config.get("configurable", {}).get("on_chunk_callback") if config else None
     content = ""
-    
+
     for chunk in llm_deepseek.stream(fmt_prompt):
         content += chunk.content
         if callback:
             callback(chunk.content)
-            
+
+    # 流式 LLM 整段输出在结束后一次性记入 trace，便于后台查看完整产物
+    agent_trace.record_llm_call(
+        node="supervisor_editor",
+        label="EDITOR_FORMATTING (最终 Markdown，流式)",
+        prompt=fmt_prompt,
+        response=content,
+    )
+    agent_trace.record_node_end("supervisor_editor", f"已生成最终 Markdown ({len(content)} 字符)")
+
     return {
         "final_output": content,
         "errors": []
@@ -592,17 +669,21 @@ class MultiAgentRunnable:
         
     def stream(self, input_dict, config=None, stream_mode="messages"):
         q = queue.Queue()
-        
+        # 在父线程读取当前 trace 上下文，下方 worker 线程入口处再 attach。
+        # 否则 LangGraph 在 worker 里同步执行的所有节点都拿不到 run_id，trace 全丢。
+        parent_run_id = agent_trace.get_current_run_id()
+
         def on_chunk(token):
             q.put(token)
-            
+
         def run_graph():
             try:
+                agent_trace.attach_run(parent_run_id)
                 run_config = config or {}
                 configurable = run_config.get("configurable", {})
                 configurable["on_chunk_callback"] = on_chunk
                 run_config["configurable"] = configurable
-                
+
                 self.graph.invoke(input_dict, run_config)
             except Exception as e:
                 q.put(e)

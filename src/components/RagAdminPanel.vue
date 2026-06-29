@@ -438,6 +438,210 @@
             </div>
           </div>
         </div>
+
+        <!-- ============ Tab 5: Agent 追踪 ============ -->
+        <div v-if="activeTab === 'agent'" class="tab-panel">
+          <div class="panel-header">
+            <h2 class="panel-title">Agent 调用追踪</h2>
+            <div class="panel-actions">
+              <el-button size="small" :loading="loadingTraces" @click="fetchAgentTraces">
+                <el-icon v-if="!loadingTraces"><Refresh /></el-icon>
+                刷新
+              </el-button>
+              <el-button size="small" type="danger" plain @click="handleClearTraces">
+                <el-icon><Delete /></el-icon>
+                清空记录
+              </el-button>
+            </div>
+          </div>
+
+          <p class="agent-tip">
+            <el-icon><InfoFilled /></el-icon>
+            点击左侧任意 Run 查看每个节点中所有模型 / 工具的输入输出。Run 按时间倒序，最近 50 条。
+          </p>
+
+          <div class="agent-layout">
+            <!-- 左侧：Run 列表 -->
+            <aside class="agent-runs-pane">
+              <div v-if="loadingTraces" class="loading-state compact">
+                <el-icon class="is-loading"><Loading /></el-icon>
+                <span>加载追踪记录...</span>
+              </div>
+              <div v-else-if="agentTraces.length === 0" class="empty-state compact">
+                <el-icon :size="36" class="empty-icon"><Cpu /></el-icon>
+                <p class="empty-desc">暂无 Agent 调用记录。<br/>触发一次「Agent 路线规划」即可看到记录。</p>
+              </div>
+              <div v-else class="agent-runs-list">
+                <div
+                  v-for="run in agentTraces"
+                  :key="run.run_id"
+                  class="agent-run-card"
+                  :class="{
+                    active: selectedRunId === run.run_id,
+                    error: run.status === 'error',
+                    running: run.status === 'running'
+                  }"
+                  @click="selectAgentRun(run.run_id)"
+                >
+                  <div class="run-card-header">
+                    <el-tag size="small" :type="getRunStatusType(run.status)" effect="dark">
+                      {{ getRunStatusLabel(run.status) }}
+                    </el-tag>
+                    <span class="run-steps-count">{{ run.step_count }} 步</span>
+                  </div>
+                  <div class="run-card-meta">
+                    <span class="run-days">{{ run.days }} 日</span>
+                    <span class="run-time">{{ formatRunTime(run.start_time) }}</span>
+                  </div>
+                  <div class="run-card-landmarks" :title="(run.landmark_names || []).join('，')">
+                    {{ (run.landmark_names || []).slice(0, 3).join('、') }}
+                    <span v-if="(run.landmark_names || []).length > 3" class="more-tag">
+                      +{{ run.landmark_names.length - 3 }}
+                    </span>
+                  </div>
+                  <div v-if="run.error" class="run-card-error" :title="run.error">
+                    错误: {{ run.error.slice(0, 60) }}
+                  </div>
+                </div>
+              </div>
+            </aside>
+
+            <!-- 右侧：选中 Run 的详情 -->
+            <section class="agent-detail-pane">
+              <div v-if="loadingTraceDetail" class="loading-state">
+                <el-icon class="is-loading" :size="24"><Loading /></el-icon>
+                <span>加载步骤详情...</span>
+              </div>
+
+              <div v-else-if="!selectedTrace" class="empty-state">
+                <el-icon :size="48" class="empty-icon"><ChatDotRound /></el-icon>
+                <h3 class="empty-title">请选择一次 Run</h3>
+                <p class="empty-desc">在左侧列表中选择 Run 查看每一步模型 / 工具的输入输出。</p>
+              </div>
+
+              <div v-else class="agent-trace-content">
+                <!-- Run 概览 -->
+                <div class="trace-overview">
+                  <div class="overview-row">
+                    <span class="overview-label">Run ID:</span>
+                    <code class="overview-code">{{ selectedTrace.run_id }}</code>
+                  </div>
+                  <div class="overview-row">
+                    <span class="overview-label">开始:</span>
+                    <span>{{ selectedTrace.start_time }}</span>
+                    <span class="overview-label" style="margin-left: 16px;">结束:</span>
+                    <span>{{ selectedTrace.end_time || '运行中' }}</span>
+                  </div>
+                  <div class="overview-row">
+                    <span class="overview-label">天数:</span>
+                    <span>{{ selectedTrace.days }}</span>
+                    <span class="overview-label" style="margin-left: 16px;">步骤总数:</span>
+                    <span>{{ (selectedTrace.steps || []).length }}</span>
+                  </div>
+                  <div v-if="selectedTrace.error" class="overview-error">
+                    错误: {{ selectedTrace.error }}
+                  </div>
+                </div>
+
+                <!-- 按节点分组的步骤 -->
+                <div
+                  v-for="(group, gIdx) in groupedSteps"
+                  :key="gIdx"
+                  class="node-group"
+                >
+                  <div class="node-group-header">
+                    <el-icon class="node-group-icon"><MagicStick /></el-icon>
+                    <span class="node-group-name">{{ group.node }}</span>
+                    <span class="node-group-count">{{ group.steps.length }} 步</span>
+                  </div>
+
+                  <div class="step-timeline">
+                    <div
+                      v-for="(step, sIdx) in group.steps"
+                      :key="sIdx"
+                      class="step-item"
+                      :class="`step-${step.type}`"
+                    >
+                      <div class="step-marker">
+                        <el-icon v-if="step.type === 'llm_call'"><ChatDotRound /></el-icon>
+                        <el-icon v-else-if="step.type === 'tool_call'"><ToolsIcon /></el-icon>
+                        <el-icon v-else-if="step.type === 'status'"><InfoFilled /></el-icon>
+                        <el-icon v-else><MagicStick /></el-icon>
+                      </div>
+
+                      <div class="step-body" @click="toggleStep(step._id)">
+                        <div class="step-header">
+                          <el-tag size="small" :type="getStepTagType(step.type)" effect="plain">
+                            {{ getStepTypeLabel(step.type) }}
+                          </el-tag>
+                          <span class="step-title">
+                            <template v-if="step.type === 'llm_call'">{{ step.label }}</template>
+                            <template v-else-if="step.type === 'tool_call'">
+                              {{ step.tool }}
+                              <span v-if="step.error" class="step-error-tag">出错</span>
+                            </template>
+                            <template v-else-if="step.type === 'status'">{{ step.message }}</template>
+                            <template v-else>{{ step.summary || step.type }}</template>
+                          </span>
+                          <span class="step-time">{{ step.timestamp?.split(' ')[1] }}</span>
+                          <el-icon
+                            v-if="step.type === 'llm_call' || step.type === 'tool_call'"
+                            class="step-arrow"
+                            :class="{ rotated: expandedSteps[step._id] }"
+                          >
+                            <ArrowRight />
+                          </el-icon>
+                        </div>
+
+                        <!-- 展开的输入/输出 -->
+                        <div v-if="expandedSteps[step._id]" class="step-detail" @click.stop>
+                          <template v-if="step.type === 'llm_call'">
+                            <div class="io-block">
+                              <div class="io-label">
+                                <span>📥 输入 Prompt</span>
+                                <span class="io-meta">model: {{ step.model }}</span>
+                                <button class="copy-btn" @click="copyText(getPromptText(step.prompt))">复制</button>
+                              </div>
+                              <pre class="io-pre">{{ getPromptText(step.prompt) }}</pre>
+                            </div>
+                            <div class="io-block">
+                              <div class="io-label">
+                                <span>📤 输出 Response</span>
+                                <button class="copy-btn" @click="copyText(step.response)">复制</button>
+                              </div>
+                              <pre class="io-pre">{{ step.response }}</pre>
+                            </div>
+                          </template>
+
+                          <template v-else-if="step.type === 'tool_call'">
+                            <div class="io-block">
+                              <div class="io-label">
+                                <span>📥 参数 Args</span>
+                                <button class="copy-btn" @click="copyText(JSON.stringify(step.args, null, 2))">复制</button>
+                              </div>
+                              <pre class="io-pre">{{ JSON.stringify(step.args, null, 2) }}</pre>
+                            </div>
+                            <div class="io-block">
+                              <div class="io-label">
+                                <span>📤 结果 Result</span>
+                                <button class="copy-btn" @click="copyText(formatStepResult(step.result))">复制</button>
+                              </div>
+                              <pre class="io-pre">{{ formatStepResult(step.result) }}</pre>
+                            </div>
+                            <div v-if="step.error" class="io-block">
+                              <div class="io-label io-label-error">⚠️ 错误</div>
+                              <pre class="io-pre io-pre-error">{{ step.error }}</pre>
+                            </div>
+                          </template>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </section>
+          </div>
+        </div>
       </main>
     </div>
   </div>
@@ -448,7 +652,8 @@ import { ref, computed, onMounted, markRaw } from 'vue'
 import {
   ArrowLeft, ArrowRight, Refresh, Delete, Edit, Plus, Search,
   Loading, CircleCheck, CircleClose, Files, Clock, Warning,
-  ChatLineRound, List, DataAnalysis, Document, Monitor
+  ChatLineRound, List, DataAnalysis, Document, Monitor,
+  Cpu, MagicStick, Tools as ToolsIcon, ChatDotRound, InfoFilled
 } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useAppStore } from '../stores/app'
@@ -460,7 +665,8 @@ const navTabs = [
   { key: 'pending', label: '待审核切片', icon: markRaw(Document) },
   { key: 'database', label: '已入库地标', icon: markRaw(DataAnalysis) },
   { key: 'logs', label: '运行日志', icon: markRaw(Clock) },
-  { key: 'recall', label: '召回测试', icon: markRaw(Monitor) }
+  { key: 'recall', label: '召回测试', icon: markRaw(Monitor) },
+  { key: 'agent', label: 'Agent 追踪', icon: markRaw(Cpu) }
 ]
 const activeTab = ref('pending')
 
@@ -473,6 +679,7 @@ function handleTabSwitch(key) {
   if (key === 'pending') fetchPending()
   else if (key === 'database') fetchLandmarks()
   else if (key === 'logs') fetchLogs()
+  else if (key === 'agent') fetchAgentTraces()
 }
 
 // ---- 待审核 ----
@@ -736,6 +943,138 @@ function getScoreType(score) {
   if (score >= 0.8) return 'success'
   if (score >= 0.5) return 'warning'
   return 'danger'
+}
+
+// ---- Agent 追踪 ----
+const agentTraces = ref([])
+const loadingTraces = ref(false)
+const selectedRunId = ref(null)
+const selectedTrace = ref(null)
+const loadingTraceDetail = ref(false)
+const expandedSteps = ref({})  // {stepId: bool}
+
+async function fetchAgentTraces() {
+  loadingTraces.value = true
+  try {
+    const resp = await fetch('/api/agent/traces')
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+    agentTraces.value = await resp.json()
+  } catch (e) {
+    ElMessage.error(`获取 Agent 追踪失败: ${e.message}`)
+  } finally {
+    loadingTraces.value = false
+  }
+}
+
+async function selectAgentRun(runId) {
+  selectedRunId.value = runId
+  selectedTrace.value = null
+  expandedSteps.value = {}
+  loadingTraceDetail.value = true
+  try {
+    const resp = await fetch(`/api/agent/trace/${encodeURIComponent(runId)}`)
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+    const trace = await resp.json()
+    // 给每个 step 分配一个稳定 id，用于展开状态映射
+    ;(trace.steps || []).forEach((s, i) => { s._id = `${runId}_${i}` })
+    selectedTrace.value = trace
+  } catch (e) {
+    ElMessage.error(`加载 Trace 详情失败: ${e.message}`)
+  } finally {
+    loadingTraceDetail.value = false
+  }
+}
+
+// 按节点分组（保持步骤原始顺序）：连续同 node 的步骤归到一个 group，
+// 节点切换时开启新 group，便于按"4 个 Agent 节点"的视角阅读。
+const groupedSteps = computed(() => {
+  if (!selectedTrace.value) return []
+  const groups = []
+  let current = null
+  for (const step of selectedTrace.value.steps || []) {
+    if (!current || current.node !== step.node) {
+      current = { node: step.node || '(unknown)', steps: [] }
+      groups.push(current)
+    }
+    current.steps.push(step)
+  }
+  return groups
+})
+
+function toggleStep(stepId) {
+  expandedSteps.value[stepId] = !expandedSteps.value[stepId]
+}
+
+function getRunStatusType(status) {
+  if (status === 'success') return 'success'
+  if (status === 'error') return 'danger'
+  if (status === 'running') return 'warning'
+  return 'info'
+}
+
+function getRunStatusLabel(status) {
+  const map = { success: '成功', error: '失败', running: '运行中' }
+  return map[status] || status
+}
+
+function getStepTagType(type) {
+  const map = { llm_call: '', tool_call: 'success', status: 'info', node_start: 'warning', node_end: 'warning' }
+  return map[type] || ''
+}
+
+function getStepTypeLabel(type) {
+  const map = {
+    llm_call: 'LLM',
+    tool_call: 'TOOL',
+    status: 'STATUS',
+    node_start: '节点开始',
+    node_end: '节点结束'
+  }
+  return map[type] || type
+}
+
+function formatRunTime(t) {
+  if (!t) return ''
+  // 输入形如 "2026-06-23 14:25:31.234"，只显示日期 + 时分秒
+  return t.split('.')[0]
+}
+
+function getPromptText(prompt) {
+  if (prompt == null) return ''
+  if (typeof prompt === 'string') return prompt
+  try { return JSON.stringify(prompt, null, 2) } catch { return String(prompt) }
+}
+
+function formatStepResult(result) {
+  if (result == null) return '(空)'
+  if (typeof result === 'string') return result
+  try { return JSON.stringify(result, null, 2) } catch { return String(result) }
+}
+
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text || '')
+    ElMessage.success('已复制到剪贴板')
+  } catch {
+    ElMessage.error('复制失败，请手动选中文本')
+  }
+}
+
+async function handleClearTraces() {
+  try {
+    await ElMessageBox.confirm('确定清空所有 Agent 追踪记录吗？此操作不可恢复。', '确认清空',
+      { confirmButtonText: '确定', cancelButtonText: '取消', type: 'warning' })
+  } catch { return }
+  try {
+    const resp = await fetch('/api/agent/traces/clear', { method: 'POST' })
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+    ElMessage.success('Agent 追踪记录已清空')
+    agentTraces.value = []
+    selectedRunId.value = null
+    selectedTrace.value = null
+  } catch (e) {
+    ElMessage.error(`清空失败: ${e.message}`)
+  }
 }
 
 // ---- 工具函数 ----
@@ -1432,5 +1771,361 @@ onMounted(() => {
 .logs-list::-webkit-scrollbar-thumb:hover,
 .chunks-list::-webkit-scrollbar-thumb:hover {
   background: rgba(0, 0, 0, 0.2);
+}
+
+/* ============ Agent 追踪 Tab ============ */
+.agent-tip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin: -8px 0 16px;
+  padding: 8px 12px;
+  background: rgba(9, 105, 218, 0.05);
+  border-radius: 8px;
+}
+
+.agent-layout {
+  display: flex;
+  gap: 16px;
+  height: calc(100vh - 260px);
+  min-height: 480px;
+}
+
+.agent-runs-pane {
+  width: 280px;
+  flex-shrink: 0;
+  background: rgba(255, 255, 255, 0.7);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(208, 215, 222, 0.4);
+  border-radius: 12px;
+  padding: 12px;
+  overflow-y: auto;
+}
+
+.agent-runs-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.agent-run-card {
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.5);
+  border: 1px solid rgba(208, 215, 222, 0.4);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.18s;
+}
+.agent-run-card:hover {
+  border-color: var(--primary-color);
+  transform: translateY(-1px);
+}
+.agent-run-card.active {
+  background: rgba(9, 105, 218, 0.08);
+  border-color: var(--primary-color);
+  box-shadow: 0 0 0 2px rgba(9, 105, 218, 0.15);
+}
+.agent-run-card.error {
+  border-left: 3px solid #f56c6c;
+}
+.agent-run-card.running {
+  border-left: 3px solid #e6a23c;
+}
+
+.run-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+.run-steps-count {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+.run-card-meta {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+}
+.run-days {
+  font-weight: 600;
+  color: var(--primary-color);
+}
+.run-card-landmarks {
+  font-size: 12px;
+  color: var(--text-color);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.more-tag {
+  color: var(--primary-color);
+  font-size: 10px;
+  margin-left: 2px;
+}
+.run-card-error {
+  margin-top: 6px;
+  padding: 4px 6px;
+  font-size: 11px;
+  color: #f56c6c;
+  background: rgba(245, 108, 108, 0.08);
+  border-radius: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-detail-pane {
+  flex: 1;
+  min-width: 0;
+  background: rgba(255, 255, 255, 0.7);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(208, 215, 222, 0.4);
+  border-radius: 12px;
+  padding: 20px;
+  overflow-y: auto;
+}
+
+.agent-trace-content {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.trace-overview {
+  padding: 12px 14px;
+  background: rgba(9, 105, 218, 0.04);
+  border: 1px solid rgba(9, 105, 218, 0.12);
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.overview-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-color);
+  flex-wrap: wrap;
+}
+.overview-label {
+  color: var(--text-secondary);
+  margin-right: 2px;
+}
+.overview-code {
+  font-family: 'SF Mono', 'Consolas', monospace;
+  font-size: 11px;
+  background: rgba(0, 0, 0, 0.05);
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+.overview-error {
+  margin-top: 4px;
+  padding: 8px 10px;
+  background: rgba(245, 108, 108, 0.1);
+  color: #f56c6c;
+  font-size: 12px;
+  border-radius: 6px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.node-group {
+  background: rgba(255, 255, 255, 0.5);
+  border: 1px solid rgba(208, 215, 222, 0.4);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.node-group-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  background: rgba(9, 105, 218, 0.06);
+  border-bottom: 1px solid rgba(208, 215, 222, 0.3);
+}
+.node-group-icon {
+  color: var(--primary-color);
+}
+.node-group-name {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--primary-color);
+  flex: 1;
+}
+.node-group-count {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.step-timeline {
+  padding: 10px 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.step-item {
+  display: flex;
+  gap: 10px;
+  padding: 8px 14px;
+}
+
+.step-marker {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  background: rgba(0, 0, 0, 0.05);
+  color: var(--text-secondary);
+  font-size: 12px;
+  margin-top: 2px;
+}
+.step-llm_call .step-marker { background: rgba(64, 158, 255, 0.15); color: #409eff; }
+.step-tool_call .step-marker { background: rgba(103, 194, 58, 0.15); color: #67c23a; }
+.step-status .step-marker { background: rgba(144, 147, 153, 0.15); color: #909399; }
+.step-node_start .step-marker,
+.step-node_end .step-marker { background: rgba(230, 162, 60, 0.15); color: #e6a23c; }
+
+.step-body {
+  flex: 1;
+  min-width: 0;
+  cursor: pointer;
+  border-radius: 6px;
+  padding: 4px 8px;
+  margin: -4px -8px;
+  transition: background 0.15s;
+}
+.step-body:hover {
+  background: rgba(0, 0, 0, 0.02);
+}
+
+.step-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.step-title {
+  flex: 1;
+  font-size: 13px;
+  color: var(--text-color);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.step-time {
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-family: 'SF Mono', 'Consolas', monospace;
+}
+.step-arrow {
+  transition: transform 0.2s;
+  color: var(--text-secondary);
+}
+.step-arrow.rotated { transform: rotate(90deg); }
+.step-error-tag {
+  margin-left: 6px;
+  padding: 0 6px;
+  font-size: 11px;
+  background: rgba(245, 108, 108, 0.15);
+  color: #f56c6c;
+  border-radius: 4px;
+}
+
+.step-detail {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  cursor: default;
+}
+
+.io-block {
+  border: 1px solid rgba(208, 215, 222, 0.4);
+  border-radius: 8px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.7);
+}
+.io-label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  background: rgba(0, 0, 0, 0.025);
+  border-bottom: 1px solid rgba(208, 215, 222, 0.3);
+}
+.io-label-error { color: #f56c6c; }
+.io-meta {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-secondary);
+  background: rgba(0, 0, 0, 0.04);
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+.copy-btn {
+  margin-left: auto;
+  font-size: 11px;
+  padding: 2px 8px;
+  background: white;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  cursor: pointer;
+  color: var(--text-secondary);
+  transition: all 0.15s;
+}
+.copy-btn:hover {
+  background: var(--primary-color);
+  color: white;
+  border-color: var(--primary-color);
+}
+
+.io-pre {
+  margin: 0;
+  padding: 10px 12px;
+  font-family: 'SF Mono', 'Consolas', 'Monaco', monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-color);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 360px;
+  overflow-y: auto;
+  background: transparent;
+}
+.io-pre-error {
+  color: #f56c6c;
+  background: rgba(245, 108, 108, 0.05);
+}
+
+.empty-state.compact {
+  padding: 40px 16px;
+}
+.empty-state.compact .empty-desc {
+  margin-top: 8px;
+  font-size: 12px;
+}
+
+.agent-runs-pane::-webkit-scrollbar,
+.agent-detail-pane::-webkit-scrollbar,
+.io-pre::-webkit-scrollbar {
+  width: 6px;
+}
+.agent-runs-pane::-webkit-scrollbar-thumb,
+.agent-detail-pane::-webkit-scrollbar-thumb,
+.io-pre::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.12);
+  border-radius: 3px;
 }
 </style>
