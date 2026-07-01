@@ -23,7 +23,8 @@ An interactive SPA for anime pilgrimage ("圣地巡礼") route planning — expl
   - **本地 AI** — 对接本地 LM Studio / Ollama 大模型
   - **智能体 (Agent)** — 基于 LangGraph 的多智能体协同规划（信息检索 → 空间路由 → 动漫润色 → 审查校验），集成 MiMo v2.5 视觉模型分析动漫截图
 - 👁️ **视觉场景分析** — Agent 模式中自动调用 MiMo v2.5 视觉模型分析 Anitabi 动漫截图，提取光照、角度、构图等画面信息，生成精准的拍照还原指南
-- 🧠 **RAG 增强检索** — 人机协同的向量检索系统，联网抓取巡礼攻略，人工审核后入库
+- 🔎 **多策略联网检索** — Agent 模式下 `get_anime_scene` 采用中文/日文/英文/站点定向多 query 召回 + 相关性打分 + DuckDuckGo 备用搜索，覆盖知乎、Bilibili、巴哈姆特、日文舞台探访博客等真实巡礼内容来源
+- 🧠 **RAG 增强检索** — 人机协同的向量检索系统，核心 query 优先 + 站点定向 fallback 联网抓取巡礼攻略，人工审核后入库
 - 📋 **历史记录** — 路线规划结果持久化存储，支持回看和重新加载
 
 ---
@@ -118,14 +119,34 @@ VITE_ARK_MODEL=
 # 后端 Agent 模式所需
 DEEPSEEK_API_KEY=your_deepseek_api_key
 TAVILY_API_KEY=your_tavily_api_key
-TAVILY_INCLUDE_DOMAINS=anitabi.cn,bgm.tv,bangumi.tv,animetourism88.com,anime-tourism.jp,seichimap.jp,ja.wikipedia.org,zh.wikipedia.org,japan-guide.com
-TAVILY_EXCLUDE_DOMAINS=github.com,huggingface.co,kaggle.com,medium.com,csdn.net,jianshu.com
+
+# 可选：限制 / 排除搜索域名（默认放开全网，排除 github/stackoverflow 等技术站点）
+# TAVILY_INCLUDE_DOMAINS=        # 留空 = 不限白名单，搜全网
+# TAVILY_EXCLUDE_DOMAINS=github.com,csdn.net,stackoverflow.com,...
 
 # MiMo 视觉模型 — Agent 模式中分析动漫截图时使用
 MIMO_API_KEY=your_mimo_api_key_here
 MIMO_MODEL=mimo-v2.5
 MIMO_BASE_URL=https://token-plan-cn.xiaomimimo.com/v1
 ```
+
+<details>
+<summary><b>🔧 搜索链路可选调优变量</b>（默认值已可用，仅在需要时调整）</summary>
+
+| 变量 | 默认 | 作用 |
+|------|------|------|
+| `ANIME_SCENE_MAX_QUERIES` | `10` | `get_anime_scene` 单地标最大 query 数 |
+| `ANIME_SCENE_ENABLE_DDG_FALLBACK` | `1` | Tavily 召回不足时是否启用 DuckDuckGo 备用搜索（`0` 关闭） |
+| `RAG_TAVILY_MAX_QUERIES` | `8` | RAG 预检索单地标总 query 预算 |
+| `RAG_TAVILY_CORE_QUERIES` | `4` | 核心优先 query 数（不超过总预算） |
+| `RAG_TAVILY_SITE_QUERIES` | `3` | 核心召回不足时的站点定向 fallback 数 |
+| `RAG_TAVILY_MIN_RESULTS` | `3` | 触发站点 fallback 的命中数阈值 |
+| `RAG_TAVILY_SEARCH_DEPTH` | `basic` | RAG 预检索 Tavily 深度（`basic`/`advanced`） |
+| `RAG_INGEST_MAX_WORKERS` | `3` | 批量缺失地标预检索并发数 |
+
+> 以上变量均通过 `parse_int_env()` 安全解析：空串 / 非数字 / 未设置均回退默认值，不会导致整批检索失败。
+
+</details>
 
 ### 3. 安装前端依赖
 
@@ -184,12 +205,12 @@ anime-travel/
 │       ├── MapView.vue           # Leaflet 地图核心
 │       ├── CoordinateLibrary.vue # 坐标库 + 历史记录
 │       ├── LandmarkDock.vue      # 底部横向地标条
-│       ├── ItineraryPanel.vue    # 行程卡片列表
 │       └── RagAdminPanel.vue     # RAG 数据中心管理
 ├── server.py                     # FastAPI 后端入口
 ├── agent.py                      # LangGraph 多智能体规划
-├── tools.py                      # Agent 工具集
+├── tools.py                      # Agent 工具集（get_anime_scene 多策略搜索 + DDG 备用）
 ├── rag_service.py                # RAG 检索与重排服务
+├── tavily_config.py              # Tavily 搜索配置 + 共享常量 + parse_int_env
 ├── pyproject.toml                # Python 依赖 (uv)
 ├── package.json                  # Node.js 依赖
 ├── vite.config.js                # Vite 配置
