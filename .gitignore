@@ -5,6 +5,8 @@ dist
 __pycache__/
 *.pyc
 .venv/
+.uv-cache/
 chroma_db/
 *.log
 codereview.md
+verification_artifacts/
