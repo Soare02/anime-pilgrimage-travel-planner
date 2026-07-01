@@ -8,6 +8,7 @@ import hashlib
 import time
 from typing import List, Dict, Any, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dotenv import load_dotenv
 
 # LangChain components
 from langchain_core.embeddings import Embeddings
@@ -15,7 +16,15 @@ from langchain_core.documents import Document
 from langchain_community.vectorstores import Chroma
 from openai import OpenAI
 from tavily import TavilyClient
-from tavily_config import get_tavily_include_domains, get_tavily_search_kwargs
+from tavily_config import (
+    get_tavily_include_domains,
+    get_tavily_search_kwargs,
+    parse_int_env,
+    ANIME_SCENE_SITE_QUERIES,
+    ANIME_SCENE_TRAVEL_KEYWORDS,
+)
+
+load_dotenv()
 
 # Version-safe import for RecursiveCharacterTextSplitter
 try:
@@ -117,7 +126,7 @@ class LMStudioReranker:
         self.model = model
         self.base_url = (base_url or os.getenv("RERANK_BASE_URL", "http://localhost:1234/v1")).rstrip("/")
         self.top_n = top_n
-        self.failure_cooldown_seconds = int(os.getenv("RERANK_FAILURE_COOLDOWN_SECONDS", "60"))
+        self.failure_cooldown_seconds = parse_int_env("RERANK_FAILURE_COOLDOWN_SECONDS", 60)
         self.unavailable_until = 0.0
 
     def _score_single(self, query: str, doc_content: str) -> float:
@@ -676,50 +685,89 @@ class RAGService:
         if not self.tavily_client:
             return ""
         
-        # 严格限制在“长效背景知识”领域，规避瞬时信息
-        queries = []
-        if bangumi and bangumi != "未知":
-            queries.append(("中文", f"动漫《{bangumi}》 圣地巡礼 {name} 还原 剧情 交通 攻略"))
-        else:
-            queries.append(("中文", f"圣地巡礼 {name} 经典拍摄角度 交通 旅游攻略"))
-
+        # 严格限制在“长效背景知识”领域，规避瞬时信息；核心 query 先跑，站点 query 仅在召回不足时补充。
+        core_queries = []
+        site_queries = []
+        # 仅当提供了真实的日文原名时才构造日文 query，避免把中文名塞进日文模板生成伪日文 query。
+        has_jp_name = bool(original_name) or bool(bangumi_original_name)
         jp_name = original_name or name
         jp_bangumi = bangumi_original_name or bangumi
-        if jp_name and (jp_name != name or (jp_bangumi and jp_bangumi != bangumi)):
-            if jp_bangumi and jp_bangumi != "未知":
-                queries.append(("日文", f"アニメ『{jp_bangumi}』 聖地巡礼 {jp_name} 舞台 場面 交通 攻略"))
-            else:
-                queries.append(("日文", f"聖地巡礼 {jp_name} 舞台 写真スポット 交通 攻略"))
+        if bangumi and bangumi != "未知":
+            core_queries.extend([
+                ("中文精确", f"动漫《{bangumi}》 圣地巡礼 {name} 还原 剧情 交通 攻略"),
+                ("中文宽松", f"{bangumi} {name} 圣地巡礼 攻略 交通 拍照机位"),
+                ("地点优先", f"{name} {bangumi} 巡礼 舞台 取景地 打卡"),
+                ("英文", f"{bangumi} {name} anime pilgrimage scene location guide"),
+            ])
+            if has_jp_name:
+                if jp_bangumi and jp_bangumi != "未知":
+                    core_queries.append(("日文", f"アニメ『{jp_bangumi}』 聖地巡礼 {jp_name} 舞台探訪 場面 アクセス"))
+                else:
+                    core_queries.append(("日文", f"聖地巡礼 {jp_name} 舞台 写真スポット 交通 攻略"))
+        else:
+            core_queries.extend([
+                ("中文", f"圣地巡礼 {name} 经典拍摄角度 交通 旅游攻略"),
+            ])
+            if has_jp_name:
+                core_queries.append(("日文", f"{jp_name} 聖地巡礼 舞台探訪 写真スポット アクセス"))
 
-        query_map = dict(queries)
-            
-        try:
-            include_domains = get_tavily_include_domains()
-            logger.info(
-                "RAG-Service: 正在对地标 [%s] 进行长效背景知识检索... 查询词: %s；白名单站点: %s",
-                name,
-                " | ".join([f"{label}: {query}" for label, query in queries]),
-                ", ".join(include_domains) if include_domains else "未限制",
-            )
-            with ThreadPoolExecutor(max_workers=min(len(query_map), 2)) as executor:
+        if bangumi and bangumi != "未知":
+            site_base = f"{bangumi} {name} 圣地巡礼 攻略"
+            jp_site_base = f"{jp_bangumi or bangumi} {jp_name} 聖地巡礼 舞台探訪"
+            for label, site_filter in ANIME_SCENE_SITE_QUERIES:
+                if "ameblo.jp" in site_filter or "livedoor.jp" in site_filter:
+                    if has_jp_name:
+                        site_queries.append((label, f"{site_filter} {jp_site_base}"))
+                else:
+                    site_queries.append((label, f"{site_filter} {site_base}"))
+
+        def dedupe_queries(queries):
+            seen_queries = set()
+            deduped_queries = []
+            for label, query in queries:
+                key = " ".join(query.split()).lower()
+                if not key or key in seen_queries:
+                    continue
+                seen_queries.add(key)
+                deduped_queries.append((label, query))
+            return deduped_queries
+
+        core_queries = dedupe_queries(core_queries)
+        site_queries = dedupe_queries(site_queries)
+        # 站点 fallback 使用独立预算 RAG_TAVILY_SITE_QUERIES，避免被核心 query 预算挤占导致只剩 1 条。
+        max_queries = parse_int_env("RAG_TAVILY_MAX_QUERIES", 8)
+        core_limit = parse_int_env("RAG_TAVILY_CORE_QUERIES", 4, max_value=max_queries)
+        site_limit = parse_int_env("RAG_TAVILY_SITE_QUERIES", 3)
+        min_results = parse_int_env("RAG_TAVILY_MIN_RESULTS", 3)
+        search_depth = os.getenv("RAG_TAVILY_SEARCH_DEPTH", "basic")
+        queries = core_queries[:core_limit]
+
+        def run_tavily_queries(query_batch: List[Tuple[str, str]]) -> List[Tuple[str, Dict[str, Any]]]:
+            if not query_batch:
+                return []
+
+            responses = []
+            with ThreadPoolExecutor(max_workers=min(len(query_batch), 3)) as executor:
                 future_to_label = {
                     executor.submit(
                         self.tavily_client.search,
                         query=query,
-                        **get_tavily_search_kwargs(search_depth="basic", max_results=5)
+                        **get_tavily_search_kwargs(search_depth=search_depth, max_results=5)
                     ): label
-                    for label, query in queries
+                    for label, query in query_batch
                 }
-                responses = []
                 for future in as_completed(future_to_label):
                     label = future_to_label[future]
                     try:
                         responses.append((label, future.result()))
                     except Exception as e:
                         logger.warning(f"RAG-Service: {label}检索失败 [{name}]: {e}")
-            
-            contents = []
-            seen_urls = set()
+            return responses
+
+        contents = []
+        seen_urls = set()
+
+        def append_useful_results(responses: List[Tuple[str, Dict[str, Any]]]) -> None:
             for label, response in responses:
                 for item in response.get("results", []):
                     title = item.get("title", "")
@@ -747,28 +795,74 @@ class RAGService:
                         logger.info(f"RAG-Service: 已跳过内容包含 Git Diff 的噪点网页: {url}")
                         continue
                         
-                    # 3. 过滤 SEO 垃圾广告或与动漫/地标/旅游完全不相关的噪音网页
-                    # 必须包含地标/动漫名之一，或者包含基本的旅游/圣地巡礼关键词
+                    # 3. 过滤 SEO 垃圾广告或与动漫/地标/旅游完全不相关的噪音网页。
+                    # 已知作品时，不能只凭通用地点名放行，否则京都站/新宿站等常见地标会混入普通页面。
                     keywords = [kw.lower() for kw in (name, original_name) if kw]
                     if bangumi and bangumi != "未知":
                         keywords.append(bangumi.lower())
                     if bangumi_original_name and bangumi_original_name != "未知":
                         keywords.append(bangumi_original_name.lower())
-                    
-                    travel_keywords = [
-                        "巡礼", "圣地", "聖地", "动漫", "アニメ", "舞台", "打卡", "交通", "攻略",
-                        "站", "駅", "拍摄", "撮影", "anime", "pilgrimage", "scene", "station", "route"
+
+                    # 复用 tools.py 的共享旅游关键词，保证两条检索路径过滤口径一致。
+                    travel_keywords = [kw.lower() for kw in ANIME_SCENE_TRAVEL_KEYWORDS]
+
+                    title_lower = title.lower()
+                    name_keywords = [kw.lower() for kw in (name, original_name) if kw]
+                    bangumi_keywords = [
+                        kw.lower()
+                        for kw in (bangumi, bangumi_original_name)
+                        if kw and kw != "未知"
                     ]
-                    
-                    has_core_kw = any(kw in content_lower or kw in title.lower() for kw in keywords)
-                    has_travel_kw = any(tkw in content_lower or tkw in title.lower() for tkw in travel_keywords)
-                    
-                    if not has_core_kw and not has_travel_kw:
-                        logger.info(f"RAG-Service: 已过滤不具备动漫/地标/旅游相关性的垃圾网页: {url}")
+                    has_name_kw = any(kw in content_lower or kw in title_lower for kw in name_keywords)
+                    has_bangumi_kw = any(kw in content_lower or kw in title_lower for kw in bangumi_keywords)
+                    has_core_kw = any(kw in content_lower or kw in title_lower for kw in keywords)
+                    has_travel_kw = any(tkw in content_lower or tkw in title_lower for tkw in travel_keywords)
+
+                    if bangumi and bangumi != "未知":
+                        is_useful = (
+                            (has_name_kw and has_travel_kw)
+                            or (has_name_kw and has_bangumi_kw)
+                            or (has_bangumi_kw and has_travel_kw)
+                        )
+                    else:
+                        is_useful = has_core_kw or has_travel_kw
+
+                    if not is_useful:
+                        missing = []
+                        if not has_name_kw:
+                            missing.append("地点名")
+                        if not has_bangumi_kw:
+                            missing.append("作品名")
+                        if not has_travel_kw:
+                            missing.append("旅游关键词")
+                        logger.info(
+                            f"RAG-Service: 已过滤不具备动漫/地标/旅游相关性的垃圾网页: {url} "
+                            f"(缺失: {'/'.join(missing)})"
+                        )
                         continue
-                    
+
                     contents.append(f"【{label}来源网页: {title} ({url})】\n{content}\n")
-                
+
+        try:
+            include_domains = get_tavily_include_domains()
+            logger.info(
+                "RAG-Service: 正在对地标 [%s] 进行长效背景知识检索... 查询词: %s；白名单站点: %s",
+                name,
+                " | ".join([f"{label}: {query}" for label, query in queries]),
+                ", ".join(include_domains) if include_domains else "未限制",
+            )
+            append_useful_results(run_tavily_queries(queries))
+
+            if len(contents) < min_results and site_queries:
+                fallback_queries = site_queries[:site_limit]
+                logger.info(
+                    "RAG-Service: 地标 [%s] 核心检索仅命中 %s 条，追加站点定向检索: %s",
+                    name,
+                    len(contents),
+                    " | ".join([f"{label}: {query}" for label, query in fallback_queries]),
+                )
+                append_useful_results(run_tavily_queries(fallback_queries))
+
             return "\n".join(contents)
         except Exception as e:
             logger.error(f"RAG-Service: 地标 [{name}] 检索失败，细节: {e}")
@@ -804,7 +898,8 @@ class RAGService:
 
         # 2. 并发对需要抓取的地标进行联网检索
         results_to_stage = []
-        with ThreadPoolExecutor(max_workers=min(len(to_search), 5)) as executor:
+        ingest_workers = parse_int_env("RAG_INGEST_MAX_WORKERS", 3)
+        with ThreadPoolExecutor(max_workers=min(len(to_search), ingest_workers)) as executor:
             future_to_lm = {
                 executor.submit(
                     self._search_single_landmark,
