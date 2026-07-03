@@ -143,19 +143,17 @@ def plan_route_endpoint(req: PlanRequest):
                 for chunk, metadata in stream_result:
                     if chunk.content:
                         yield chunk.content
-                agent_trace.end_run(status="success")
+                agent_trace.end_run_by_id(run_id, status="success")
                 ended = True
             except Exception as e:
                 print(f"[plan_route_endpoint] pipeline exception: {traceback.format_exc()}")
-                agent_trace.attach_run(run_id)
-                agent_trace.end_run(status="error", error=str(e))
+                agent_trace.end_run_by_id(run_id, status="error", error=str(e))
                 ended = True
                 yield f"\n__ERROR__:{str(e)}\n"
             finally:
                 # 客户端断开 / GeneratorExit 时也强制结束 trace（避免一直停在 running 状态）
                 if not ended:
-                    agent_trace.attach_run(run_id)
-                    agent_trace.end_run(status="aborted", error="generator closed before finish")
+                    agent_trace.end_run_by_id(run_id, status="aborted", error="generator closed before finish")
 
         response = StreamingResponse(event_generator(), media_type="text/plain")
         response.headers["X-RAG-Pending-Count"] = str(pending_count)

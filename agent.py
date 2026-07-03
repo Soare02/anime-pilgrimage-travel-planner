@@ -93,7 +93,7 @@ ROUTING_PROMPT = """
 目的地主要城市天气状况：
 {weather_info}
 
-地标详细数据（已完成联网检索与 RAG 补全）：
+地标概要数据（仅用于空间分组；完整攻略信息由程序在路由后自动恢复）：
 {landmarks_json}
 
 主编打回的修改意见（若为“无”则忽略）：
@@ -115,7 +115,7 @@ ROUTING_PROMPT = """
       "route_sequence": ["起点站", "地标1名称", "地标2名称", "返程站"],
       "transit_details": "详细的每日交通衔接描述，包含乘坐的铁路线、巴士、步行距离估算等",
       "landmarks": [
-        {{ "name": "地标名", "visit_order": 1, "geo": [0,0], "image": "", "final_info": "", "ep": "", "bangumi": "" }}
+        {{ "name": "地标名", "visit_order": 1 }}
       ]
     }}
   ]
@@ -123,7 +123,7 @@ ROUTING_PROMPT = """
 
 【严格输出规范】
 - 输出必须是严格合法的 JSON，禁止任何注释（不允许 # 或 //），禁止任何示意性占位字符（如「...」「省略」）。
-- landmarks 数组必须保留输入中每个地标的全部字段（name, geo, image, final_info, ep, bangumi 等），并按游览顺序排列；如必要可额外加 visit_order。
+- landmarks 数组只输出 name 和 visit_order，禁止复制 final_info、rag_info、image、photo_guide 等长文本字段；这些字段会由程序自动恢复。
 - 即使输入地标信息不完整，也必须给出 days 数组（不可为空），把所有地标都分配到某一天里。
 - 必须用 ```json 和 ``` 包裹 JSON。
 """
@@ -263,11 +263,76 @@ def parse_json_block(text: str) -> Dict[str, Any]:
     return {}
 
 
+RAG_QUALITY_KEYWORDS = {
+    "traffic": ("交通", "车站", "站", "地铁", "JR", "巴士", "公交", "步行", "徒步", "搭乘", "出口", "路线", "station", "walk", "train"),
+    "photo": ("拍照", "机位", "角度", "构图", "焦段", "镜头", "打卡", "还原", "pose", "摄影", "取景"),
+    "scene": ("名场面", "结局", "重逢", "场景", "画面", "时间戳", "舞台", "取景地", "剧情", "截图"),
+    "address": ("地址", "位于", "坐标", "丁目", "町", "区", "神社", "境内", "location"),
+    "tips": ("注意", "礼仪", "人流", "游客", "开放", "营业", "避开", "安静", "居民", "排队"),
+}
+
+
+def evaluate_rag_info_quality(rag_info: str) -> Dict[str, Any]:
+    """判断 RAG 摘要是否足够支撑路线生成；短 snippet 不能直接挡住 Tavily 补搜。"""
+    text = (rag_info or "").strip()
+    lowered = text.lower()
+    source_count = len(re.findall(r"https?://|来源|source|参考", text, re.IGNORECASE))
+    matched_categories = [
+        name for name, keywords in RAG_QUALITY_KEYWORDS.items()
+        if any(keyword.lower() in lowered for keyword in keywords)
+    ]
+    details = {
+        "chars": len(text),
+        "source_count": source_count,
+        "matched_categories": matched_categories,
+        "has_source": source_count > 0,
+    }
+    if not text:
+        details.update({"sufficient": False, "reason": "无 RAG 内容"})
+    elif len(text) < 180:
+        details.update({"sufficient": False, "reason": "RAG 内容过短，可能只是搜索摘要"})
+    elif source_count == 0 and len(text) < 420:
+        details.update({"sufficient": False, "reason": "RAG 摘要缺少来源 URL，且长度不足以视为完整攻略"})
+    elif len(matched_categories) < 3:
+        details.update({"sufficient": False, "reason": "RAG 缺少交通/拍照/场景/地址/注意事项等关键维度"})
+    else:
+        details.update({"sufficient": True, "reason": "RAG 信息维度较完整"})
+    return details
+
+
+def merge_landmark_context(rag_info: str, tavily_info: str) -> str:
+    rag = (rag_info or "").strip()
+    tavily = (tavily_info or "").strip()
+    parts = []
+    if rag:
+        parts.append("[RAG 摘要]\n" + rag)
+    if tavily:
+        parts.append("[Tavily 验证补充]\n" + tavily)
+    return "\n\n".join(parts)
+
+
 def _compact_text(value: Any, limit: int = 420) -> str:
     text = re.sub(r"\s+", " ", str(value or "")).strip()
     if len(text) > limit:
         return text[:limit].rstrip() + "..."
     return text
+
+
+def build_routing_landmarks(landmarks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """给 routing LLM 的轻量输入，避免它回填超长 final_info 导致响应截断。"""
+    compact = []
+    for lm in landmarks:
+        compact.append({
+            "id": lm.get("id"),
+            "name": lm.get("name"),
+            "bangumi": lm.get("bangumi"),
+            "ep": lm.get("ep"),
+            "timestamp": lm.get("timestamp"),
+            "geo": lm.get("geo"),
+            "source": lm.get("source"),
+            "route_hint": _compact_text(lm.get("final_info") or lm.get("rag_info"), 420),
+        })
+    return compact
 
 
 ANIME_EXPERT_FIELDS = (
@@ -481,17 +546,37 @@ def info_retriever_node(state: AgentState, config=None) -> Dict[str, Any]:
         ep = lm.get("ep") or ""
         timestamp = lm.get("timestamp") or ""
         rag_info = lm.get("rag_info")
+        rag_quality = evaluate_rag_info_quality(rag_info or "")
+        agent_trace.record_event(
+            "info_retriever",
+            f"RAG 质量判断: {name}",
+            {
+                "landmark": name,
+                "bangumi": bangumi,
+                "quality": rag_quality,
+                "rag_preview": (rag_info or "")[:600],
+            },
+            level="success" if rag_quality.get("sufficient") else "warning",
+        )
 
-        # RAG 命中
-        if rag_info and len(rag_info.strip()) > 30:
+        # RAG 命中且足够详细时，直接使用；短摘要会继续 Tavily 补搜。
+        if rag_quality.get("sufficient"):
             lm["final_info"] = rag_info
             lm["source"] = "RAG Context"
         else:
             # M1: bangumi 为空时跳过 Tavily，直接写入明确提示
             if not bangumi:
-                lm["final_info"] = "未提供作品名称，跳过场景检索"
-                lm["source"] = "None (No bangumi)"
+                lm["final_info"] = rag_info or "未提供作品名称，跳过场景检索"
+                lm["source"] = "RAG Context (insufficient)" if rag_info else "None (No bangumi)"
+                agent_trace.record_event(
+                    "info_retriever",
+                    f"跳过 Tavily: {name}",
+                    {"reason": "未提供作品名称", "rag_quality": rag_quality},
+                    level="warning",
+                )
             else:
+                if callback and name:
+                    callback(f"__STATUS__:RAG 信息不足，正在联网补充: {name}\n")
                 search_res = traced_tool_call(
                     node="info_retriever",
                     tool_name="get_anime_scene (Tavily)",
@@ -512,11 +597,37 @@ def info_retriever_node(state: AgentState, config=None) -> Dict[str, Any]:
                 )
                 val_data = parse_json_block(val_res)
                 if val_data.get("relevant", False):
-                    lm["final_info"] = val_data.get("extracted_details") or search_res
-                    lm["source"] = "Tavily Search (Validated)"
+                    tavily_info = val_data.get("extracted_details") or search_res
+                    lm["final_info"] = merge_landmark_context(rag_info or "", tavily_info)
+                    lm["source"] = "RAG + Tavily Search (Validated)" if rag_info else "Tavily Search (Validated)"
+                    agent_trace.record_event(
+                        "info_retriever",
+                        f"Tavily 验证通过: {name}",
+                        {
+                            "landmark": name,
+                            "source": lm["source"],
+                            "validation": val_data,
+                        },
+                        level="success",
+                    )
                 else:
-                    lm["final_info"] = "未找到直接相关的动漫圣地巡礼背景信息（已过滤不相关搜索结果）。"
-                    lm["source"] = "None (Filtered)"
+                    if rag_info:
+                        lm["final_info"] = rag_info
+                        lm["source"] = "RAG Context (insufficient, Tavily filtered)"
+                    else:
+                        lm["final_info"] = "未找到直接相关的动漫圣地巡礼背景信息（已过滤不相关搜索结果）。"
+                        lm["source"] = "None (Filtered)"
+                    agent_trace.record_event(
+                        "info_retriever",
+                        f"Tavily 验证未通过: {name}",
+                        {
+                            "landmark": name,
+                            "source": lm["source"],
+                            "validation": val_data,
+                            "search_preview": search_res[:1200] if isinstance(search_res, str) else str(search_res)[:1200],
+                        },
+                        level="warning",
+                    )
 
         # MiMo 视觉分析
         image_url = lm.get("image")
@@ -577,7 +688,8 @@ def routing_specialist_node(state: AgentState, config=None) -> Dict[str, Any]:
         weather_info = "无法获取天气"
 
     # 3. Generate routing draft
-    landmarks_json = json.dumps(landmarks, ensure_ascii=False, indent=2)
+    routing_landmarks = build_routing_landmarks(landmarks)
+    landmarks_json = json.dumps(routing_landmarks, ensure_ascii=False, indent=2)
     errors_text = "\n".join([f"- {err}" for err in errors]) if errors else "无"
 
     prompt = ROUTING_PROMPT.format(
@@ -592,6 +704,17 @@ def routing_specialist_node(state: AgentState, config=None) -> Dict[str, Any]:
 
     # M6: validate routing result
     if not routing_draft.get("days"):
+        agent_trace.record_event(
+            "routing_specialist",
+            "ROUTING 解析失败",
+            {
+                "reason": "LLM 返回内容无法解析出 routing_draft.days",
+                "response_chars": len(res or ""),
+                "response_head": (res or "")[:1800],
+                "response_tail": (res or "")[-1800:],
+            },
+            level="error",
+        )
         # 诊断输出：把 LLM 原始返回打到终端，方便定位问题
         logger.error("ROUTING RAW (parsed empty) ===\n%s\n=== END", res)
         if callback:
@@ -609,7 +732,7 @@ def routing_specialist_node(state: AgentState, config=None) -> Dict[str, Any]:
             ref = field_lookup.get(lm.get("name"))
             if ref:
                 for key in ("final_info", "image", "geo", "ep", "bangumi", "vision_analyzed", "source"):
-                    if key in ref and not lm.get(key):
+                    if key in ref:
                         lm[key] = ref[key]
 
     agent_trace.record_node_end("routing_specialist", f"已生成 routing_draft (days={len(routing_draft.get('days', []))})")

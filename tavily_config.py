@@ -100,6 +100,7 @@ def get_tavily_search_kwargs(
     search_depth: str = "basic",
     include_answer: bool = False,
     max_results: Optional[int] = None,
+    include_raw_content: Optional[bool] = None,
 ) -> dict:
     """Build Tavily search kwargs with centralized domain allow/deny lists."""
     include_domains = _parse_domain_list(
@@ -115,6 +116,8 @@ def get_tavily_search_kwargs(
     }
     if max_results is not None:
         kwargs["max_results"] = max_results
+    if include_raw_content is not None:
+        kwargs["include_raw_content"] = include_raw_content
     if include_domains:
         kwargs["include_domains"] = include_domains
     if exclude_domains:

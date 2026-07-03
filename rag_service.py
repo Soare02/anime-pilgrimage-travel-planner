@@ -38,6 +38,24 @@ logging.basicConfig(level=logging.INFO)
 HISTORY_FILE = os.path.join(os.path.dirname(__file__), "chroma_db", "rag_history.json")
 PENDING_FILE = os.path.join(os.path.dirname(__file__), "chroma_db", "rag_pending.json")
 
+
+def include_raw_content_enabled(env_name: str, default: str = "1") -> bool:
+    return os.getenv(env_name, default).strip().lower() not in {"0", "false", "no", "off"}
+
+
+def clean_search_text(value: Any) -> str:
+    return " ".join(str(value or "").split())
+
+
+def result_content_with_raw(item: Dict[str, Any], raw_limit: int = 1800) -> str:
+    content = clean_search_text(item.get("content", ""))
+    raw_content = clean_search_text(item.get("raw_content", ""))
+    if raw_content and raw_content != content:
+        if len(raw_content) > raw_limit:
+            raw_content = raw_content[:raw_limit].rstrip() + "..."
+        return f"{content}\n正文摘录: {raw_content}" if content else raw_content
+    return content
+
 def log_rag_event(event_type: str, data: dict):
     try:
         os.makedirs(os.path.dirname(HISTORY_FILE), exist_ok=True)
@@ -752,7 +770,11 @@ class RAGService:
                     executor.submit(
                         self.tavily_client.search,
                         query=query,
-                        **get_tavily_search_kwargs(search_depth=search_depth, max_results=5)
+                        **get_tavily_search_kwargs(
+                            search_depth=search_depth,
+                            max_results=5,
+                            include_raw_content=include_raw_content_enabled("RAG_TAVILY_INCLUDE_RAW_CONTENT", "1"),
+                        )
                     ): label
                     for label, query in query_batch
                 }
@@ -772,7 +794,7 @@ class RAGService:
                 for item in response.get("results", []):
                     title = item.get("title", "")
                     url = item.get("url", "")
-                    content = item.get("content", "")
+                    content = result_content_with_raw(item)
 
                     if url and url in seen_urls:
                         continue

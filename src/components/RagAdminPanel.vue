@@ -492,6 +492,11 @@
                   <div class="run-card-meta">
                     <span class="run-days">{{ run.days }} 日</span>
                     <span class="run-time">{{ formatRunTime(run.start_time) }}</span>
+                    <span v-if="run.duration_ms" class="run-time">{{ formatDuration(run.duration_ms) }}</span>
+                  </div>
+                  <div v-if="(run.tool_names || []).length" class="run-card-tools" :title="run.tool_names.join('，')">
+                    工具: {{ run.tool_names.slice(0, 2).join('、') }}
+                    <span v-if="run.tool_names.length > 2">+{{ run.tool_names.length - 2 }}</span>
                   </div>
                   <div class="run-card-landmarks" :title="(run.landmark_names || []).join('，')">
                     {{ (run.landmark_names || []).slice(0, 3).join('、') }}
@@ -537,6 +542,12 @@
                     <span>{{ selectedTrace.days }}</span>
                     <span class="overview-label" style="margin-left: 16px;">步骤总数:</span>
                     <span>{{ (selectedTrace.steps || []).length }}</span>
+                    <span class="overview-label" style="margin-left: 16px;">耗时:</span>
+                    <span>{{ selectedTrace.duration_ms ? formatDuration(selectedTrace.duration_ms) : '-' }}</span>
+                  </div>
+                  <div v-if="(selectedTrace.tool_names || []).length" class="overview-row">
+                    <span class="overview-label">工具:</span>
+                    <span>{{ selectedTrace.tool_names.join('，') }}</span>
                   </div>
                   <div v-if="selectedTrace.error" class="overview-error">
                     错误: {{ selectedTrace.error }}
@@ -580,17 +591,21 @@
                               {{ step.tool }}
                               <span v-if="step.error" class="step-error-tag">出错</span>
                             </template>
+                            <template v-else-if="step.type === 'event'">{{ step.title }}</template>
                             <template v-else-if="step.type === 'status'">{{ step.message }}</template>
                             <template v-else>{{ step.summary || step.type }}</template>
                           </span>
                           <span class="step-time">{{ step.timestamp?.split(' ')[1] }}</span>
                           <el-icon
-                            v-if="step.type === 'llm_call' || step.type === 'tool_call'"
+                            v-if="isExpandableStep(step)"
                             class="step-arrow"
                             :class="{ rotated: expandedSteps[step._id] }"
                           >
                             <ArrowRight />
                           </el-icon>
+                        </div>
+                        <div v-if="getStepPreview(step)" class="step-preview">
+                          {{ getStepPreview(step) }}
                         </div>
 
                         <!-- 展开的输入/输出 -->
@@ -631,6 +646,17 @@
                             <div v-if="step.error" class="io-block">
                               <div class="io-label io-label-error">⚠️ 错误</div>
                               <pre class="io-pre io-pre-error">{{ step.error }}</pre>
+                            </div>
+                          </template>
+
+                          <template v-else-if="step.type === 'event'">
+                            <div class="io-block">
+                              <div class="io-label">
+                                <span>调试事件</span>
+                                <span class="io-meta">level: {{ step.level || 'info' }}</span>
+                                <button class="copy-btn" @click="copyText(JSON.stringify(step.details || {}, null, 2))">复制</button>
+                              </div>
+                              <pre class="io-pre">{{ JSON.stringify(step.details || {}, null, 2) }}</pre>
                             </div>
                           </template>
                         </div>
@@ -1018,7 +1044,7 @@ function getRunStatusLabel(status) {
 }
 
 function getStepTagType(type) {
-  const map = { llm_call: '', tool_call: 'success', status: 'info', node_start: 'warning', node_end: 'warning' }
+  const map = { llm_call: '', tool_call: 'success', event: 'warning', status: 'info', node_start: 'warning', node_end: 'warning' }
   return map[type] || ''
 }
 
@@ -1026,6 +1052,7 @@ function getStepTypeLabel(type) {
   const map = {
     llm_call: 'LLM',
     tool_call: 'TOOL',
+    event: 'EVENT',
     status: 'STATUS',
     node_start: '节点开始',
     node_end: '节点结束'
@@ -1037,6 +1064,27 @@ function formatRunTime(t) {
   if (!t) return ''
   // 输入形如 "2026-06-23 14:25:31.234"，只显示日期 + 时分秒
   return t.split('.')[0]
+}
+
+function formatDuration(ms) {
+  if (!ms && ms !== 0) return ''
+  if (ms < 1000) return `${ms}ms`
+  const seconds = Math.round(ms / 100) / 10
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.floor(seconds / 60)
+  const rest = Math.round(seconds % 60)
+  return `${minutes}m ${rest}s`
+}
+
+function isExpandableStep(step) {
+  return step.type === 'llm_call' || step.type === 'tool_call' || step.type === 'event'
+}
+
+function getStepPreview(step) {
+  if (step.type === 'llm_call') return step.response_preview || step.summary || ''
+  if (step.type === 'tool_call') return step.result_preview || step.summary || ''
+  if (step.type === 'event') return step.details_preview || step.summary || ''
+  return ''
 }
 
 function getPromptText(prompt) {
@@ -1846,7 +1894,8 @@ onMounted(() => {
 }
 .run-card-meta {
   display: flex;
-  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
   font-size: 11px;
   color: var(--text-secondary);
   margin-bottom: 4px;
@@ -1858,6 +1907,17 @@ onMounted(() => {
 .run-card-landmarks {
   font-size: 12px;
   color: var(--text-color);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.run-card-tools {
+  margin-bottom: 4px;
+  font-size: 11px;
+  color: var(--primary-color);
+  background: rgba(9, 105, 218, 0.06);
+  border-radius: 4px;
+  padding: 3px 6px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1991,6 +2051,7 @@ onMounted(() => {
 }
 .step-llm_call .step-marker { background: rgba(64, 158, 255, 0.15); color: #409eff; }
 .step-tool_call .step-marker { background: rgba(103, 194, 58, 0.15); color: #67c23a; }
+.step-event .step-marker { background: rgba(230, 162, 60, 0.15); color: #e6a23c; }
 .step-status .step-marker { background: rgba(144, 147, 153, 0.15); color: #909399; }
 .step-node_start .step-marker,
 .step-node_end .step-marker { background: rgba(230, 162, 60, 0.15); color: #e6a23c; }
@@ -2012,6 +2073,16 @@ onMounted(() => {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+.step-preview {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-secondary);
+  background: rgba(0, 0, 0, 0.025);
+  border-radius: 6px;
+  padding: 6px 8px;
+  word-break: break-word;
 }
 .step-title {
   flex: 1;

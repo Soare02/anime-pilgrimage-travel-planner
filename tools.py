@@ -137,6 +137,20 @@ def _clean_search_text(value: str) -> str:
     return value.strip()
 
 
+def _include_raw_content_enabled(env_name: str, default: str = "1") -> bool:
+    return os.getenv(env_name, default).strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _result_content_with_raw(result: dict, raw_limit: int = 1400) -> str:
+    content = _clean_search_text(result.get("content", ""))
+    raw_content = _clean_search_text(result.get("raw_content", ""))
+    if raw_content and raw_content != content:
+        if len(raw_content) > raw_limit:
+            raw_content = raw_content[:raw_limit].rstrip() + "..."
+        return f"{content}\n正文摘录: {raw_content}" if content else raw_content
+    return content
+
+
 def _dedupe_items(items):
     seen = set()
     deduped = []
@@ -220,7 +234,7 @@ def _is_noise_search_result(url: str, title: str, content: str) -> bool:
 
 def _score_anime_scene_result(result: dict, core_terms, query: str = "") -> int:
     title = _clean_search_text(result.get("title", ""))
-    content = _clean_search_text(result.get("content", ""))
+    content = _result_content_with_raw(result)
     url = result.get("url", "") or ""
     text = f"{title} {content} {url}".lower()
     domain = urlparse(url).netloc.lower()
@@ -376,7 +390,12 @@ def get_anime_scene(
                 executor.submit(
                     tavily.search,
                     query=query,
-                    **get_tavily_search_kwargs(search_depth="advanced", include_answer=True, max_results=6)
+                    **get_tavily_search_kwargs(
+                        search_depth="advanced",
+                        include_answer=True,
+                        max_results=6,
+                        include_raw_content=_include_raw_content_enabled("ANIME_SCENE_INCLUDE_RAW_CONTENT", "1"),
+                    )
                 ): (label, query)
                 for label, query in queries
             }
@@ -410,11 +429,12 @@ def get_anime_scene(
                 if url in seen_urls:
                     continue
                 title = result.get("title", "")
-                content = result.get("content", "")
+                content = _result_content_with_raw(result)
                 if _is_noise_search_result(url, title, content):
                     continue
                 seen_urls.add(url)
                 item = dict(result)
+                item["content"] = content
                 item["_label"] = label
                 item["_query"] = query
                 item["_score"] = _score_anime_scene_result(item, core_terms, query)

@@ -77,6 +77,17 @@ def _preview(value: Any, limit: int = PREVIEW_LEN) -> str:
     return text
 
 
+def _duration_ms(start_time: Optional[str], end_time: Optional[str]) -> Optional[int]:
+    if not start_time or not end_time:
+        return None
+    try:
+        start = datetime.datetime.strptime(start_time, "%Y-%m-%d %H:%M:%S.%f")
+        end = datetime.datetime.strptime(end_time, "%Y-%m-%d %H:%M:%S.%f")
+        return int((end - start).total_seconds() * 1000)
+    except Exception:
+        return None
+
+
 def _write_json_atomic(path: str, data: Any) -> None:
     """原子写 JSON：先写同目录临时文件，再替换目标文件。"""
     directory = os.path.dirname(path)
@@ -163,6 +174,11 @@ def start_run(days: int, landmark_names: List[str]) -> str:
 def end_run(status: str = "success", error: Optional[str] = None) -> None:
     """结束当前上下文的 trace 记录并持久化。"""
     run_id = _current_run_id.get()
+    end_run_by_id(run_id, status=status, error=error)
+
+
+def end_run_by_id(run_id: Optional[str], status: str = "success", error: Optional[str] = None) -> None:
+    """按 run_id 结束 trace；即使当前 ContextVar 丢失，也能可靠落盘。"""
     _dbg(f"end_run called: run_id={run_id} status={status} (thread={threading.current_thread().name})")
     if not run_id:
         _dbg("  end_run: no run_id in context, NOTHING PERSISTED")
@@ -170,14 +186,40 @@ def end_run(status: str = "success", error: Optional[str] = None) -> None:
     with _lock:
         run = _active_runs.pop(run_id, None)
     if run is None:
-        _dbg(f"  end_run: {run_id} not in _active_runs, skip")
+        _dbg(f"  end_run: {run_id} not in _active_runs, patch persisted record if present")
+        _patch_persisted_run(run_id, status=status, error=error)
         return
     run["end_time"] = _now()
     run["status"] = status
     if error:
         run["error"] = error
+    run["duration_ms"] = _duration_ms(run.get("start_time"), run.get("end_time"))
     _persist_run(run)
     _dbg(f"  end_run: persisted {run_id} with {len(run['steps'])} steps to {TRACE_FILE}")
+
+
+def _patch_persisted_run(run_id: str, status: str, error: Optional[str] = None) -> None:
+    """进程重载或上下文丢失时，尽量把磁盘上的 running trace 收尾。"""
+    try:
+        with _file_lock:
+            if not os.path.exists(TRACE_FILE):
+                return
+            with open(TRACE_FILE, "r", encoding="utf-8") as f:
+                runs = json.load(f)
+            changed = False
+            for run in runs:
+                if run.get("run_id") == run_id and run.get("status") == "running":
+                    run["end_time"] = _now()
+                    run["status"] = status
+                    if error:
+                        run["error"] = error
+                    run["duration_ms"] = _duration_ms(run.get("start_time"), run.get("end_time"))
+                    changed = True
+                    break
+            if changed:
+                _write_json_atomic(TRACE_FILE, runs[:MAX_RUNS])
+    except Exception as e:
+        _dbg(f"_patch_persisted_run FAILED: {e}")
 
 
 def get_current_run_id() -> Optional[str]:
@@ -243,6 +285,11 @@ def record_llm_call(
         "model": model,
         "prompt": prompt,
         "response": response,
+        "summary": f"{label}: prompt {len(_to_text(prompt))} chars -> response {len(_to_text(response))} chars",
+        "prompt_chars": len(_to_text(prompt)),
+        "response_chars": len(_to_text(response)),
+        "prompt_preview": _preview(prompt),
+        "response_preview": _preview(response),
     }
     if extra:
         step["extra"] = extra
@@ -263,6 +310,9 @@ def record_tool_call(
         "tool": tool_name,
         "args": args,
         "result": result,
+        "summary": f"{tool_name}: result {len(_to_text(result))} chars",
+        "args_preview": _preview(args),
+        "result_preview": _preview(result),
     }
     if error:
         step["error"] = error
@@ -310,6 +360,14 @@ def list_traces() -> List[Dict[str, Any]]:
     # 摘要：去掉 steps，加上 step_count
     summaries = []
     for r in runs:
+        steps = r.get("steps", [])
+        tool_names = []
+        llm_count = 0
+        for step in steps:
+            if step.get("type") == "tool_call" and step.get("tool") not in tool_names:
+                tool_names.append(step.get("tool"))
+            if step.get("type") == "llm_call":
+                llm_count += 1
         summaries.append({
             "run_id": r.get("run_id"),
             "start_time": r.get("start_time"),
@@ -318,7 +376,11 @@ def list_traces() -> List[Dict[str, Any]]:
             "days": r.get("days"),
             "landmark_names": r.get("landmark_names", []),
             "error": r.get("error"),
-            "step_count": len(r.get("steps", [])),
+            "step_count": len(steps),
+            "llm_count": llm_count,
+            "tool_names": tool_names,
+            "last_step": steps[-1].get("summary") if steps else "",
+            "duration_ms": r.get("duration_ms") or _duration_ms(r.get("start_time"), r.get("end_time")),
         })
     return summaries
 
@@ -334,6 +396,17 @@ def get_trace(run_id: str) -> Optional[Dict[str, Any]]:
         return None
     for r in runs:
         if r.get("run_id") == run_id:
+            steps = r.get("steps", [])
+            tool_names = []
+            llm_count = 0
+            for step in steps:
+                if step.get("type") == "tool_call" and step.get("tool") not in tool_names:
+                    tool_names.append(step.get("tool"))
+                if step.get("type") == "llm_call":
+                    llm_count += 1
+            r["tool_names"] = tool_names
+            r["llm_count"] = llm_count
+            r["duration_ms"] = r.get("duration_ms") or _duration_ms(r.get("start_time"), r.get("end_time"))
             return r
     return None
 
