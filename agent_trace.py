@@ -28,6 +28,7 @@ def _dbg(msg: str) -> None:
 TRACE_FILE = os.path.join(os.path.dirname(__file__), "chroma_db", "agent_traces.json")
 MAX_RUNS = 50
 MAX_FIELD_LEN = 50000  # 单字段最大字符数，超出会截断并加省略号
+PREVIEW_LEN = 360
 
 _current_run_id: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
     "agent_trace_run_id", default=None
@@ -36,6 +37,7 @@ _current_run_id: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
 # 内存中正在运行的 traces（按 run_id 索引）
 _active_runs: Dict[str, Dict[str, Any]] = {}
 _lock = threading.Lock()
+_file_lock = threading.Lock()
 
 
 def _now() -> str:
@@ -57,23 +59,61 @@ def _truncate(value: Any) -> Any:
     return _truncate(str(value))
 
 
+def _to_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, ensure_ascii=False, indent=2)
+    except Exception:
+        return str(value)
+
+
+def _preview(value: Any, limit: int = PREVIEW_LEN) -> str:
+    text = " ".join(_to_text(value).split())
+    if len(text) > limit:
+        return text[:limit].rstrip() + "..."
+    return text
+
+
+def _write_json_atomic(path: str, data: Any) -> None:
+    """原子写 JSON：先写同目录临时文件，再替换目标文件。"""
+    directory = os.path.dirname(path)
+    os.makedirs(directory, exist_ok=True)
+    temp_path = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
+    try:
+        with open(temp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_path, path)
+    finally:
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+
+
 def _persist_run(run: Dict[str, Any]) -> None:
     """把单条 run 写入持久化文件（追加到列表头部，保留 MAX_RUNS 条）。"""
     try:
-        os.makedirs(os.path.dirname(TRACE_FILE), exist_ok=True)
-        runs: List[Dict[str, Any]] = []
-        if os.path.exists(TRACE_FILE):
-            try:
-                with open(TRACE_FILE, "r", encoding="utf-8") as f:
-                    runs = json.load(f)
-            except Exception:
-                runs = []
-        # 去重：如果该 run_id 已存在（增量更新 / 重试），先移除旧记录
-        runs = [r for r in runs if r.get("run_id") != run.get("run_id")]
-        runs.insert(0, run)
-        runs = runs[:MAX_RUNS]
-        with open(TRACE_FILE, "w", encoding="utf-8") as f:
-            json.dump(runs, f, ensure_ascii=False, indent=2)
+        with _file_lock:
+            runs: List[Dict[str, Any]] = []
+            if os.path.exists(TRACE_FILE):
+                try:
+                    with open(TRACE_FILE, "r", encoding="utf-8") as f:
+                        loaded = json.load(f)
+                        if isinstance(loaded, list):
+                            runs = loaded
+                except Exception:
+                    runs = []
+            # 去重：如果该 run_id 已存在（增量更新 / 重试），先移除旧记录
+            runs = [r for r in runs if r.get("run_id") != run.get("run_id")]
+            runs.insert(0, run)
+            runs = runs[:MAX_RUNS]
+            _write_json_atomic(TRACE_FILE, runs)
         _dbg(f"_persist_run wrote {TRACE_FILE} (total {len(runs)} runs on disk, this run has {len(run.get('steps', []))} steps)")
     except Exception as e:
         _dbg(f"_persist_run FAILED: {e}")
@@ -229,6 +269,24 @@ def record_tool_call(
     _add_step(step)
 
 
+def record_event(
+    node: str,
+    title: str,
+    details: Optional[Dict[str, Any]] = None,
+    level: str = "info",
+) -> None:
+    """记录结构化调试事件，适合 RAG 命中、跳过原因、质量判断等非 LLM/工具步骤。"""
+    _add_step({
+        "type": "event",
+        "node": node,
+        "title": title,
+        "level": level,
+        "summary": title,
+        "details": details or {},
+        "details_preview": _preview(details or {}),
+    })
+
+
 def record_status(node: str, message: str) -> None:
     """记录用户可见的进度回调（与前端 __STATUS__ 同步）。"""
     _add_step({
@@ -281,5 +339,6 @@ def get_trace(run_id: str) -> Optional[Dict[str, Any]]:
 
 
 def clear_traces() -> None:
-    if os.path.exists(TRACE_FILE):
-        os.remove(TRACE_FILE)
+    with _file_lock:
+        if os.path.exists(TRACE_FILE):
+            os.remove(TRACE_FILE)

@@ -130,33 +130,26 @@ ROUTING_PROMPT = """
 
 ANIME_EXPERT_PROMPT = """
 你是一个动漫原画与圣地巡礼名场面还原专家。
-你的任务是为交通专家规划好的每日大纲注入“动漫情怀”与“拍照还原指南”。
+你的任务是为交通专家规划好的每日地标补充“动漫情怀”与“拍照还原指南”。
 
-空间交通规划大纲：
-{routing_draft_json}
+轻量地标上下文：
+{anime_context_json}
 
 规则与要求：
-1. **名场面时段还原优先**：检查每个地标在原作中的时间氛围（如清晨、黄昏、夜景等）。在不破坏交通专家划分的“同城同区域”大原则的前提下，微调同一天内点位的游览顺序，尽量让名场面在对应时段被访问（例如：黄昏时登大吉山展望台，晚上去京都车站）。
+1. **只补充字段，不重排路线**：不得修改天数、地理分组、访问顺序、路线顺序或交通信息；这些会由程序保留并合并。
 2. **打卡拍照指南**：对每个地标，结合其补全信息，给出最佳摄影角度（如：站在宇治桥西侧桥头往东拍）、镜头焦段建议、圣地还原的经典 Pose 动作建议（如：模仿久美子双手抱头、还原名台词等）。
 3. **情怀与礼仪贴士**：补充相关的粉丝文化和当地礼仪（如：在宇治神社打卡时保持安静，不要打扰附近居民，或者吹奏部打卡礼仪）。
-4. **不要破坏地理分组**：不得将地标跨天乱调，必须保留交通专家分配的每日地标组合。
+4. **避免复制长字段**：不要输出 final_info、rag_info、image、route_sequence、transit_details 等长字段或既有路线字段；程序会自动合并回完整路线。
 
 请输出一个 JSON 对象，包含以下字段：
 {{
   "days": [
     {{
       "day_number": 1,
-      "region": "当日巡礼核心区域名称",
-      "route_sequence": ["起点站", "地标1名称", "地标2名称", "返程站"],
-      "transit_details": "交通细节",
       "landmarks": [
         {{
           "name": "地标名称",
-          "bangumi": "作品名称",
-          "ep": "集数",
-          "timestamp": "时间戳",
-          "geo": "坐标",
-          "final_info": "基础信息",
+          "visit_order": 1,
           "anime_scene_atmosphere": "原作名场面剧情与时段氛围描述",
           "photo_guide": "极致详细的拍照还原指南（含角度、机位、推荐时段）",
           "pose_suggestions": "经典打卡 Pose 与台词还原建议",
@@ -167,6 +160,11 @@ ANIME_EXPERT_PROMPT = """
   ]
 }}
 
+【严格输出规范】
+- landmarks 数组只输出 name、visit_order 和 4 个新增字段。
+- 禁止复制 final_info、rag_info、image、geo、bangumi、ep、timestamp、route_sequence、transit_details。
+- 必须覆盖输入中的每一个地标，day_number 与 visit_order 必须沿用输入。
+- 输出必须是严格合法的 JSON，禁止任何 markdown 解释文本。
 请务必只返回 JSON 块，并用 ```json 和 ``` 包裹。
 """
 
@@ -263,6 +261,87 @@ def parse_json_block(text: str) -> Dict[str, Any]:
             except Exception:
                 pass
     return {}
+
+
+def _compact_text(value: Any, limit: int = 420) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if len(text) > limit:
+        return text[:limit].rstrip() + "..."
+    return text
+
+
+ANIME_EXPERT_FIELDS = (
+    "anime_scene_atmosphere",
+    "photo_guide",
+    "pose_suggestions",
+    "fans_tips",
+)
+
+
+def build_anime_expert_context(routing_draft: Dict[str, Any]) -> Dict[str, Any]:
+    """给 anime_expert LLM 的轻量输入；完整路线与长字段由程序合并保留。"""
+    days = []
+    for day in routing_draft.get("days", []):
+        compact_day = {
+            "day_number": day.get("day_number"),
+            "region": day.get("region"),
+            "landmarks": [],
+        }
+        for lm in day.get("landmarks", []):
+            compact_day["landmarks"].append({
+                "name": lm.get("name"),
+                "visit_order": lm.get("visit_order"),
+                "bangumi": lm.get("bangumi"),
+                "ep": lm.get("ep"),
+                "timestamp": lm.get("timestamp"),
+                "geo": lm.get("geo"),
+                "scene_context": _compact_text(lm.get("final_info") or lm.get("rag_info"), 900),
+            })
+        days.append(compact_day)
+    return {"days": days}
+
+
+def merge_anime_expert_details(
+    routing_draft: Dict[str, Any],
+    anime_details: Dict[str, Any],
+) -> Dict[str, Any]:
+    """把 anime_expert 生成的补充字段合并回完整 routing_draft。"""
+    refined = json.loads(json.dumps(routing_draft, ensure_ascii=False))
+    supplement_days = [
+        day for day in anime_details.get("days", [])
+        if isinstance(day, dict)
+    ]
+
+    for day_index, day in enumerate(refined.get("days", [])):
+        day_number = day.get("day_number")
+        supplement_day = None
+        for candidate in supplement_days:
+            if candidate.get("day_number") == day_number:
+                supplement_day = candidate
+                break
+        if supplement_day is None and day_index < len(supplement_days):
+            supplement_day = supplement_days[day_index]
+        if not supplement_day:
+            continue
+
+        raw_supplements = supplement_day.get("landmarks", [])
+        supplements = [
+            item for item in raw_supplements
+            if isinstance(item, dict)
+        ] if isinstance(raw_supplements, list) else []
+        by_name = {item.get("name"): item for item in supplements if item.get("name")}
+        by_order = {item.get("visit_order"): item for item in supplements if item.get("visit_order") is not None}
+
+        for lm in day.get("landmarks", []):
+            supplement = by_name.get(lm.get("name")) or by_order.get(lm.get("visit_order"))
+            if not supplement:
+                continue
+            for field in ANIME_EXPERT_FIELDS:
+                value = supplement.get(field)
+                if value:
+                    lm[field] = value
+
+    return refined
 
 
 def traced_llm_invoke(node: str, label: str, prompt: str) -> str:
@@ -563,13 +642,37 @@ def anime_expert_node(state: AgentState, config=None) -> Dict[str, Any]:
             if ok and callback:
                 callback(f"__STATUS__:MiMo视觉分析(兜底): {lm_name}...\n")
 
-    # 用视觉增强后的 routing_draft 交给 DeepSeek 生成拍照指南
+    # 用轻量上下文交给 DeepSeek 生成补充字段，避免复制 final_info 导致 JSON 截断
+    anime_context = build_anime_expert_context(routing_draft)
     prompt = ANIME_EXPERT_PROMPT.format(
-        routing_draft_json=json.dumps(routing_draft, ensure_ascii=False, indent=2)
+        anime_context_json=json.dumps(anime_context, ensure_ascii=False, indent=2)
     )
 
     res = traced_llm_invoke("anime_expert", "ANIME_EXPERT (拍照指南润色)", prompt)
-    refined_itinerary = parse_json_block(res)
+    anime_details = parse_json_block(res)
+    anime_days = anime_details.get("days")
+
+    if (
+        not isinstance(anime_days, list)
+        or not any(isinstance(day, dict) for day in anime_days)
+    ):
+        agent_trace.record_event(
+            "anime_expert",
+            "ANIME_EXPERT 解析失败",
+            {
+                "reason": "LLM 返回内容无法解析出 anime_details.days",
+                "response_chars": len(res or ""),
+                "response_head": (res or "")[:1800],
+                "response_tail": (res or "")[-1800:],
+            },
+            level="error",
+        )
+        logger.error("ANIME_EXPERT RAW (parsed empty) ===\n%s\n=== END", res)
+        if callback:
+            callback("__STATUS__:警告 — 动漫场景润色失败，请重试或减少地标数量\n")
+        raise RuntimeError("动漫场景润色失败：LLM 返回的 anime_details.days 为空")
+
+    refined_itinerary = merge_anime_expert_details(routing_draft, anime_details)
 
     agent_trace.record_node_end("anime_expert", f"已生成 refined_itinerary (days={len(refined_itinerary.get('days', []))})")
     return {
