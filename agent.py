@@ -16,6 +16,7 @@ from langgraph.graph import StateGraph, END
 # Import tools from workspace
 from tools import (
     get_anime_scene,
+    get_anime_scene_backend_label,
     get_weather,
     analyze_anime_scene_image,
     MIMO_ERROR_PREFIX,
@@ -300,14 +301,15 @@ def evaluate_rag_info_quality(rag_info: str) -> Dict[str, Any]:
     return details
 
 
-def merge_landmark_context(rag_info: str, tavily_info: str) -> str:
+def merge_landmark_context(rag_info: str, search_info: str) -> str:
     rag = (rag_info or "").strip()
-    tavily = (tavily_info or "").strip()
+    search = (search_info or "").strip()
+    search_backend_label = get_anime_scene_backend_label()
     parts = []
     if rag:
         parts.append("[RAG 摘要]\n" + rag)
-    if tavily:
-        parts.append("[Tavily 验证补充]\n" + tavily)
+    if search:
+        parts.append(f"[{search_backend_label} 验证补充]\n" + search)
     return "\n\n".join(parts)
 
 
@@ -528,10 +530,11 @@ def info_retriever_node(state: AgentState, config=None) -> Dict[str, Any]:
     completed_landmarks = [None] * total  # 预分配，保持顺序
     # M5: 全局标记——仅首次发现未配置 key 时发状态回调，避免 N 次重复
     mimo_no_key_warned = False
+    search_backend_label = get_anime_scene_backend_label()
     parent_run_id = agent_trace.get_current_run_id()
 
     def process_landmark(idx, lm):
-        """处理单个 landmark（RAG/Tavily + MiMo），在 worker 线程中执行。"""
+        """处理单个 landmark（RAG/联网检索 + MiMo），在 worker 线程中执行。"""
         # 子线程需要显式 attach 当前 run_id，否则 ContextVar 默认值为 None，追踪丢失
         agent_trace.attach_run(parent_run_id)
         name = lm.get("name")
@@ -564,13 +567,13 @@ def info_retriever_node(state: AgentState, config=None) -> Dict[str, Any]:
             lm["final_info"] = rag_info
             lm["source"] = "RAG Context"
         else:
-            # M1: bangumi 为空时跳过 Tavily，直接写入明确提示
+            # M1: bangumi 为空时跳过联网检索，直接写入明确提示
             if not bangumi:
                 lm["final_info"] = rag_info or "未提供作品名称，跳过场景检索"
                 lm["source"] = "RAG Context (insufficient)" if rag_info else "None (No bangumi)"
                 agent_trace.record_event(
                     "info_retriever",
-                    f"跳过 Tavily: {name}",
+                    f"跳过{search_backend_label}: {name}",
                     {"reason": "未提供作品名称", "rag_quality": rag_quality},
                     level="warning",
                 )
@@ -579,7 +582,7 @@ def info_retriever_node(state: AgentState, config=None) -> Dict[str, Any]:
                     callback(f"__STATUS__:RAG 信息不足，正在联网补充: {name}\n")
                 search_res = traced_tool_call(
                     node="info_retriever",
-                    tool_name="get_anime_scene (Tavily)",
+                    tool_name=f"get_anime_scene ({search_backend_label})",
                     func=get_anime_scene.func,
                     anime_title=bangumi, episode=ep,
                     location_name=name, timestamp=timestamp,
@@ -599,10 +602,10 @@ def info_retriever_node(state: AgentState, config=None) -> Dict[str, Any]:
                 if val_data.get("relevant", False):
                     tavily_info = val_data.get("extracted_details") or search_res
                     lm["final_info"] = merge_landmark_context(rag_info or "", tavily_info)
-                    lm["source"] = "RAG + Tavily Search (Validated)" if rag_info else "Tavily Search (Validated)"
+                    lm["source"] = f"RAG + {search_backend_label} (Validated)" if rag_info else f"{search_backend_label} (Validated)"
                     agent_trace.record_event(
                         "info_retriever",
-                        f"Tavily 验证通过: {name}",
+                        f"{search_backend_label} 验证通过: {name}",
                         {
                             "landmark": name,
                             "source": lm["source"],
@@ -619,7 +622,7 @@ def info_retriever_node(state: AgentState, config=None) -> Dict[str, Any]:
                         lm["source"] = "None (Filtered)"
                     agent_trace.record_event(
                         "info_retriever",
-                        f"Tavily 验证未通过: {name}",
+                        f"{search_backend_label} 验证未通过: {name}",
                         {
                             "landmark": name,
                             "source": lm["source"],

@@ -7,7 +7,6 @@ from urllib.parse import parse_qs, unquote, urlparse
 from dotenv import load_dotenv
 import requests
 from langchain.tools import tool
-from tavily import TavilyClient
 from openai import OpenAI
 from tavily_config import (
     get_tavily_search_kwargs,
@@ -17,6 +16,11 @@ from tavily_config import (
     ANIME_SCENE_VALUE_DOMAINS,
     ANIME_SCENE_TRAVEL_KEYWORDS,
 )
+try:
+    from tavily import TavilyClient
+except ImportError:
+    TavilyClient = None
+
 load_dotenv()
 
 # MiMo 视觉分析返回值哨兵常量（供 agent.py 跨模块复用，避免硬编码字符串）
@@ -29,6 +33,11 @@ MIMO_NO_KEY_SUFFIX = "未配置MIMO_API_KEY环境变量"
 _mimo_client = None
 # 一旦确认缺少 key，置位此 flag，避免每个地标重复尝试初始化并 raise
 _mimo_unavailable = False
+
+def _build_tavily_client(api_key: str):
+    if TavilyClient is None:
+        raise RuntimeError("未安装 tavily 依赖。")
+    return TavilyClient(api_key=api_key)
 
 def _get_mimo_client():
     global _mimo_client
@@ -93,7 +102,9 @@ def get_attraction(city: str, weather: str) -> str:
         return "错误:未配置TAVILY_API_KEY环境变量。"
 
     # 2. 初始化Tavily客户端
-    tavily = TavilyClient(api_key=api_key)
+    if TavilyClient is None:
+        return "错误:未安装 tavily 依赖，无法执行景点联网搜索。"
+    tavily = _build_tavily_client(api_key)
     
     # 3. 构造一个精确的查询
     query = f"'{city}' 在'{weather}'天气下最值得去的旅游景点推荐及理由"
@@ -274,6 +285,56 @@ def _unwrap_duckduckgo_url(url: str) -> str:
     return url
 
 
+def _bing_html_search(query: str, max_results: int = 5):
+    """Bing HTML 搜索（cn.bing.com，国内可达）。返回 (results, error)。
+    results 元素形状与 _duckduckgo_html_search 一致：{title, url, content}。"""
+    try:
+        resp = requests.get(
+            "https://cn.bing.com/search",
+            params={"q": query, "count": str(max_results + 5), "setlang": "zh-Hans"},
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+                "Accept-Language": "ja,zh-CN;q=0.9,zh;q=0.8,en;q=0.7",
+            },
+            timeout=8,
+        )
+        resp.raise_for_status()
+    except Exception as e:
+        return [], f"Bing请求失败: {e}"
+
+    page = resp.text
+    results = []
+    # 每个结果在 <li class="b_algo"> 块内
+    block_pattern = re.compile(r'<li class="b_algo"[^>]*>(.*?)</li>', re.DOTALL)
+    # h2 内的锚点：<h2 ...><a ... href="URL">TITLE(可能含 <strong> 高亮)</a></h2>
+    link_pattern = re.compile(
+        r'<h2[^>]*>\s*<a[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
+        re.DOTALL,
+    )
+    snippet_pattern = re.compile(r'<p[^>]*>(.*?)</p>', re.DOTALL)
+
+    for block in block_pattern.findall(page):
+        m = link_pattern.search(block)
+        if not m:
+            continue
+        url = html.unescape(m.group(1))
+        # 剥离 <strong> 等内联标签取纯文本标题
+        title = re.sub(r"<[^>]+>", "", m.group(2))
+        title = html.unescape(title).strip()
+        if not title or not url:
+            continue
+        # 摘要取块内第一个 <p>
+        content = ""
+        sm = snippet_pattern.search(block)
+        if sm:
+            content = re.sub(r"<[^>]+>", "", sm.group(1))
+            content = html.unescape(content).strip()
+        results.append({"title": title, "url": url, "content": content})
+        if len(results) >= max_results:
+            break
+    return results, None
+
+
 def _duckduckgo_html_search(query: str, max_results: int = 5):
     """返回 (results, error)。error 非 None 时表示请求/解析失败，由调用方记入 query_errors。"""
     try:
@@ -347,6 +408,216 @@ def _format_anime_scene_results(results, query_errors):
     return "\n".join(lines), ""
 
 
+# ---------------- 直接网页抓取（替代 Tavily）----------------
+# 思路：自己拼接 DDG HTML 搜索链接获取候选 URL，再并发抓取排名靠前的页面正文，
+# 用程序提取主文本喂给下游 LLM。无 API key 依赖，纯 HTTP + HTML 解析。
+
+def _html_to_main_text(html_str: str, max_chars: int = 5000) -> str:
+    """简易正文提取：剥离脚本/样式/导航等噪声，保留段落、列表项、标题文本。"""
+    if not html_str:
+        return ""
+    # 移除 script/style/noscript/template 整块
+    html_str = re.sub(
+        r"<(script|style|noscript|template)[^>]*>.*?</\1\s*>",
+        " ", html_str, flags=re.DOTALL | re.IGNORECASE,
+    )
+    # 移除 nav/header/footer/aside/form/svg 整块（这些几乎不含巡礼正文）
+    html_str = re.sub(
+        r"<(nav|header|footer|aside|form|svg)[^>]*>.*?</\1\s*>",
+        " ", html_str, flags=re.DOTALL | re.IGNORECASE,
+    )
+    # 收集 p / li / h1-6 / blockquote / dd / dt 内的文本块
+    blocks = re.findall(
+        r"<(p|li|h[1-6]|blockquote|dd|dt)[^>]*>(.*?)</\1\s*>",
+        html_str, re.DOTALL | re.IGNORECASE,
+    )
+    parts = []
+    for _, inner in blocks:
+        text = re.sub(r"<[^>]+>", " ", inner)        # 去内联标签
+        text = html.unescape(text)
+        text = re.sub(r"\s+", " ", text).strip()
+        if len(text) >= 30:                            # 过滤短碎片
+            parts.append(text)
+    text = "\n".join(parts)
+    if len(text) > max_chars:
+        text = text[:max_chars].rstrip() + "..."
+    return text
+
+
+def _fetch_page_content(url: str, timeout: float = 8.0) -> tuple:
+    """抓取单个网页正文。返回 (content, error)。error 非 None 时 content 为空串。"""
+    try:
+        resp = requests.get(
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (compatible; anime-travel/1.0)",
+                "Accept-Language": "ja,zh-CN;q=0.9,zh;q=0.8,en;q=0.7",
+            },
+            timeout=timeout,
+            allow_redirects=True,
+        )
+        resp.raise_for_status()
+        # 修正 requests 对没有显式 charset 的响应默认误判为 ISO-8859-1 的问题
+        if not resp.encoding or resp.encoding.lower() == "iso-8859-1":
+            resp.encoding = resp.apparent_encoding or "utf-8"
+        return _html_to_main_text(resp.text), None
+    except Exception as e:
+        return "", f"页面抓取失败: {e}"
+
+
+def _baidu_html_search(query: str, max_results: int = 5):
+    """Baidu HTML 搜索（国内可达，中文分词好，召回质量高）。
+    返回 (results, error)。直接从结果页 HTML 提取真实 URL（mu 属性）、标题（s-text 标记）、
+    摘要（em 高亮块），无需解析 baidu.com/link 跳转，速度快且不会 404。
+    注意：必须用 HTTP（HTTPS 会被反爬降级到 227 字节 JS 跳转页）。"""
+    try:
+        resp = requests.get(
+            "http://www.baidu.com/s",
+            params={"wd": query, "rn": str(max_results + 8)},
+            headers={
+                "User-Agent": "Mozilla/5.0 (compatible; anime-travel/1.0)",
+                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.7",
+            },
+            timeout=8,
+        )
+        resp.raise_for_status()
+    except Exception as e:
+        return [], f"Baidu请求失败: {e}"
+
+    page = resp.text
+    if len(page) < 1000:  # 反爬降级页（227 字节 JS 跳转）
+        return [], "Baidu返回降级页（疑似反爬）"
+
+    # 按 result c-container 切块，每块独立提取 mu/url/title/snippet
+    parts = re.split(r'(?=<div[^>]*class="[^"]*result c-container)', page)
+    results = []
+    for block in parts:
+        if len(results) >= max_results:
+            break
+        mu = re.search(r'\smu="([^"]+)"', block)
+        tm = re.search(r"<!--s-text-->(.*?)<!--/s-text-->", block, re.DOTALL)
+        if not mu or not tm:
+            continue
+        url = html.unescape(mu.group(1))
+        title = re.sub(r"<[^>]+>", "", tm.group(1)).strip()
+        if not title or not url:
+            continue
+        # 摘要：取含 <em> 高亮的最长纯文本块（关键词上下文）
+        snippet = ""
+        for m in re.finditer(r">([^<]{0,80}<em>[^<]*</em>[^<]{0,120})", block):
+            clean = re.sub(r"<[^>]+>", "", m.group(1)).strip()
+            if len(clean) > 40 and "bds." not in clean and "function" not in clean:
+                if len(clean) > len(snippet):
+                    snippet = clean
+        results.append({"title": title, "url": url, "content": snippet})
+    return results, None
+
+
+def _resolve_direct_search_engines() -> list:
+    """direct 路径使用的搜索引擎列表，按优先级排列。
+    默认 baidu（国内可达、中文分词好）；可选 ddg / bing / both。"""
+    cfg = os.getenv("DIRECT_SEARCH_ENGINE", "baidu").strip().lower()
+    if cfg == "ddg":
+        return [_duckduckgo_html_search]
+    if cfg == "bing":
+        return [_bing_html_search]
+    if cfg == "both":
+        return [_baidu_html_search, _bing_html_search]
+    return [_baidu_html_search]
+
+
+def _direct_web_search(
+    queries,
+    core_terms,
+    max_results_per_query: int = 5,
+    max_pages_to_fetch: int = 4,
+):
+    """拼接搜索引擎链接 + 抓取结果网页正文，替代 Tavily。
+    返回 (scored_results, query_errors)，结果形状与 Tavily 路径一致。"""
+    scored_results = []
+    seen_urls = set()
+    query_errors = []
+    engines = _resolve_direct_search_engines()
+    if not queries or not engines:
+        return [], []
+
+    # 1. 并发执行所有 (引擎 × query) 组合，收集候选 URL + 摘要
+    tasks = []
+    for label, query in queries:
+        for engine in engines:
+            tasks.append((engine, label, query))
+    with ThreadPoolExecutor(max_workers=min(len(tasks), 4)) as executor:
+        future_to_meta = {
+            executor.submit(engine, query, max_results_per_query): (engine.__name__, label, query)
+            for engine, label, query in tasks
+        }
+        for future in as_completed(future_to_meta):
+            engine_name, label, query = future_to_meta[future]
+            try:
+                results, err = future.result()
+            except Exception as e:
+                query_errors.append((f"{engine_name}/{label}", f"异常: {e}"))
+                continue
+            if err:
+                query_errors.append((f"{engine_name}/{label}", err))
+                continue
+            for result in results:
+                url = result.get("url", "")
+                if not url or url in seen_urls:
+                    continue
+                if _is_noise_search_result(url, result.get("title", ""), result.get("content", "")):
+                    continue
+                seen_urls.add(url)
+                item = dict(result)
+                item["_label"] = label
+                item["_query"] = query
+                item["_score"] = _score_anime_scene_result(item, core_terms, query)
+                scored_results.append(item)
+
+    # 2. 按相关性排序，取 top N 抓取完整正文（DDG 摘要太短，不够 LLM 用）
+    scored_results.sort(key=lambda x: x.get("_score", 0), reverse=True)
+    top = [it for it in scored_results if it.get("_score", 0) >= 3][:max_pages_to_fetch]
+
+    # 3. 并发抓取页面正文，用正文替换短摘要并重新打分
+    if top:
+        with ThreadPoolExecutor(max_workers=min(len(top), 3)) as executor:
+            future_to_item = {executor.submit(_fetch_page_content, it["url"]): it for it in top}
+            for future in as_completed(future_to_item):
+                item = future_to_item[future]
+                content, err = future.result()
+                if err:
+                    query_errors.append((item["_label"], err))
+                elif content and len(content) > len(item.get("content", "")):
+                    item["content"] = content
+                    item["_score"] = max(
+                        item["_score"],
+                        _score_anime_scene_result(item, core_terms, item.get("_query", "")),
+                    )
+
+    return scored_results, query_errors
+
+
+def _resolve_anime_scene_backend() -> str:
+    """决定 get_anime_scene 使用哪个后端：direct / tavily。
+    - ANIME_SCENE_BACKEND=direct 强制直接抓取
+    - ANIME_SCENE_BACKEND=tavily 强制 Tavily（无 key / 依赖则报错）
+    - ANIME_SCENE_BACKEND=auto 根据 TAVILY_API_KEY 自动选择
+    - 未配置时默认 direct，确保新直抓方案在旧环境里也会生效
+    """
+    backend = os.getenv("ANIME_SCENE_BACKEND", "direct").strip().lower()
+    if backend == "auto":
+        return "tavily" if os.getenv("TAVILY_API_KEY") else "direct"
+    if backend == "direct":
+        return "direct"
+    if backend == "tavily":
+        return "tavily"
+    return "direct"
+
+
+def get_anime_scene_backend_label() -> str:
+    return "Direct Web Search" if _resolve_anime_scene_backend() == "direct" else "Tavily"
+
+
 @tool
 def get_anime_scene(
     anime_title: str,
@@ -369,10 +640,12 @@ def get_anime_scene(
         location_name_ja: 地点日文原名
     """
     api_key = os.getenv("TAVILY_API_KEY")
-    if not api_key:
-        return "错误:未配置TAVILY_API_KEY环境变量。"
-
-    tavily = TavilyClient(api_key=api_key)
+    backend = _resolve_anime_scene_backend()
+    if backend == "tavily":
+        if not api_key:
+            return "错误:未配置TAVILY_API_KEY环境变量，且 ANIME_SCENE_BACKEND=tavily。"
+        if TavilyClient is None:
+            return "错误:未安装 tavily 依赖，且 ANIME_SCENE_BACKEND=tavily。"
 
     try:
         queries = _build_anime_scene_queries(
@@ -383,65 +656,70 @@ def get_anime_scene(
             anime_title_ja=anime_title_ja,
             location_name_ja=location_name_ja,
         )
-        responses = []
+        core_terms = _anime_scene_terms(anime_title, location_name, anime_title_ja, location_name_ja)
         query_errors = []
-        with ThreadPoolExecutor(max_workers=min(len(queries), 4)) as executor:
-            future_to_label = {
-                executor.submit(
-                    tavily.search,
-                    query=query,
-                    **get_tavily_search_kwargs(
-                        search_depth="advanced",
-                        include_answer=True,
-                        max_results=6,
-                        include_raw_content=_include_raw_content_enabled("ANIME_SCENE_INCLUDE_RAW_CONTENT", "1"),
-                    )
-                ): (label, query)
-                for label, query in queries
-            }
-            for future in as_completed(future_to_label):
-                label, query = future_to_label[future]
-                try:
-                    responses.append((label, query, future.result()))
-                except Exception as e:
-                    query_errors.append((label, str(e)))
-
         scored_results = []
         seen_urls = set()
-        core_terms = _anime_scene_terms(anime_title, location_name, anime_title_ja, location_name_ja)
-        for label, query, response in responses:
-            answer = response.get("answer")
-            if answer:
-                synthetic = {
-                    "title": f"{label}综合回答",
-                    "url": f"tavily://answer/{label}",
-                    "content": answer,
-                    "_label": label,
-                    "_synthetic_answer": True,
+
+        if backend == "direct":
+            # 直接抓取路径：DDG 搜索 + 页面正文抓取，无需 API key
+            scored_results, query_errors = _direct_web_search(queries, core_terms)
+        else:
+            # Tavily 路径（原逻辑）
+            tavily = _build_tavily_client(api_key)
+            responses = []
+            with ThreadPoolExecutor(max_workers=min(len(queries), 4)) as executor:
+                future_to_label = {
+                    executor.submit(
+                        tavily.search,
+                        query=query,
+                        **get_tavily_search_kwargs(
+                            search_depth="advanced",
+                            include_answer=True,
+                            max_results=6,
+                            include_raw_content=_include_raw_content_enabled("ANIME_SCENE_INCLUDE_RAW_CONTENT", "1"),
+                        )
+                    ): (label, query)
+                    for label, query in queries
                 }
-                # 综合回答是 Tavily 最精炼的摘要，给保底分避免被普通结果 >=3 阈值误杀。
-                synthetic["_score"] = max(_score_anime_scene_result(synthetic, core_terms, query), 5)
-                scored_results.append(synthetic)
-            for result in response.get("results", []):
-                url = result.get("url", "")
-                if not url:
-                    continue
-                if url in seen_urls:
-                    continue
-                title = result.get("title", "")
-                content = _result_content_with_raw(result)
-                if _is_noise_search_result(url, title, content):
-                    continue
-                seen_urls.add(url)
-                item = dict(result)
-                item["content"] = content
-                item["_label"] = label
-                item["_query"] = query
-                item["_score"] = _score_anime_scene_result(item, core_terms, query)
-                scored_results.append(item)
+                for future in as_completed(future_to_label):
+                    label, query = future_to_label[future]
+                    try:
+                        responses.append((label, query, future.result()))
+                    except Exception as e:
+                        query_errors.append((label, str(e)))
+
+            for label, query, response in responses:
+                answer = response.get("answer")
+                if answer:
+                    synthetic = {
+                        "title": f"{label}综合回答",
+                        "url": f"tavily://answer/{label}",
+                        "content": answer,
+                        "_label": label,
+                        "_synthetic_answer": True,
+                    }
+                    synthetic["_score"] = max(_score_anime_scene_result(synthetic, core_terms, query), 5)
+                    scored_results.append(synthetic)
+                for result in response.get("results", []):
+                    url = result.get("url", "")
+                    if not url or url in seen_urls:
+                        continue
+                    title = result.get("title", "")
+                    content = _result_content_with_raw(result)
+                    if _is_noise_search_result(url, title, content):
+                        continue
+                    seen_urls.add(url)
+                    item = dict(result)
+                    item["content"] = content
+                    item["_label"] = label
+                    item["_query"] = query
+                    item["_score"] = _score_anime_scene_result(item, core_terms, query)
+                    scored_results.append(item)
 
         useful_results = [item for item in scored_results if item.get("_score", 0) >= 3]
-        if len(useful_results) < 3 and os.getenv("ANIME_SCENE_ENABLE_DDG_FALLBACK", "1") != "0":
+        # 仅 Tavily 路径在召回不足时追加 DDG 兜底；direct 路径本身已基于 DDG，不再重复
+        if backend != "direct" and len(useful_results) < 3 and os.getenv("ANIME_SCENE_ENABLE_DDG_FALLBACK", "1") != "0":
             fallback_queries = queries[:3]
             with ThreadPoolExecutor(max_workers=min(len(fallback_queries), 3)) as executor:
                 future_to_label = {
