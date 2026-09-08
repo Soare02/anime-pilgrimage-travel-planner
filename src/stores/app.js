@@ -7,12 +7,16 @@ export const useAppStore = defineStore('app', () => {
   const bangumi = ref(null)
   const points = ref([])
   const selectedPointId = ref(null)
+  const mapFocusRequest = ref(0)
   const itinerary = ref([])
   const days = ref(1)
   const loading = ref(false)
+  const planning = ref(false)
   const error = ref(null)
   const searchResults = ref([])
   const searching = ref(false)
+  let searchRequestId = 0
+  let searchController = null
 
   const coordinateLibrary = ref([])
   const libraryItinerary = ref([])
@@ -22,6 +26,8 @@ export const useAppStore = defineStore('app', () => {
   const routeHistory = ref(loadRouteHistory())
   const compareData = ref(null)
   const showAdminPage = ref(false)
+  const activePanel = ref('explore')
+  const settingsOpen = ref(false)
   const aiConfig = ref(loadAiConfig())
 
   function loadAiConfig() {
@@ -156,6 +162,7 @@ export const useAppStore = defineStore('app', () => {
   })
 
   async function searchBangumi(subjectID) {
+    clearSearchResults()
     loading.value = true
     error.value = null
     bangumi.value = null
@@ -196,7 +203,7 @@ export const useAppStore = defineStore('app', () => {
     loading.value = true
     try {
       const result = planRoute(selected, days.value, defaultCenter.value)
-      
+
       points.value.forEach(p => {
         p.day = null
       })
@@ -220,6 +227,7 @@ export const useAppStore = defineStore('app', () => {
 
   function selectPoint(id) {
     selectedPointId.value = id
+    mapFocusRequest.value++
   }
 
   function clearSelection() {
@@ -237,23 +245,36 @@ export const useAppStore = defineStore('app', () => {
   }
 
   async function searchByKey(keyword) {
+    clearSearchResults()
     if (!keyword || !keyword.trim()) {
-      searchResults.value = []
       return
     }
+    const requestId = ++searchRequestId
+    const controller = new AbortController()
+    searchController = controller
     searching.value = true
     error.value = null
     try {
-      searchResults.value = await searchBangumiByKey(keyword.trim())
+      const results = await searchBangumiByKey(keyword.trim(), { signal: controller.signal })
+      if (requestId === searchRequestId) searchResults.value = results
     } catch (e) {
-      error.value = e.message || '搜索失败'
-      searchResults.value = []
+      if (requestId === searchRequestId) {
+        error.value = e.message || '搜索失败'
+        searchResults.value = []
+      }
     } finally {
-      searching.value = false
+      if (requestId === searchRequestId) {
+        searching.value = false
+        searchController = null
+      }
     }
   }
 
   function clearSearchResults() {
+    searchRequestId++
+    searchController?.abort()
+    searchController = null
+    searching.value = false
     searchResults.value = []
   }
 
@@ -309,11 +330,11 @@ export const useAppStore = defineStore('app', () => {
     const selected = librarySelected.value
     if (selected.length === 0) return
     loading.value = true
+    planning.value = true
+    error.value = null
     libraryAiResponse.value = ''
     try {
       const config = activeAiConfig.value
-      console.log('[AI] config:', JSON.stringify(config))
-      console.log('[AI] aiConfig:', JSON.stringify(aiConfig.value))
       const result = await generateAIRoute(
         libraryDays.value,
         selected,
@@ -338,6 +359,7 @@ export const useAppStore = defineStore('app', () => {
       error.value = e.message || 'AI 路线规划失败'
     } finally {
       loading.value = false
+      planning.value = false
     }
   }
 
@@ -362,9 +384,12 @@ export const useAppStore = defineStore('app', () => {
 
   return {
     showAdminPage,
+    activePanel,
+    settingsOpen,
     bangumi,
     points,
     selectedPointId,
+    mapFocusRequest,
     selectedPoint,
     checkedPoints,
     checkedCount,
@@ -373,6 +398,7 @@ export const useAppStore = defineStore('app', () => {
     itinerary,
     days,
     loading,
+    planning,
     error,
     searchResults,
     searching,

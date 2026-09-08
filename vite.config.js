@@ -26,9 +26,10 @@ export default defineConfig({
         changeOrigin: true,
       },
       '/bgm': {
-        target: 'https://api.bgm.tv',
+        target: 'https://v2-anitabi.magiconch.com/api/bgm',
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/bgm/, ''),
+        proxyTimeout: 15000,
       },
     },
   },

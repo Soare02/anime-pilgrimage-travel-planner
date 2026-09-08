@@ -13,7 +13,7 @@ An interactive SPA for anime pilgrimage ("圣地巡礼") route planning — expl
 
 ## ✨ 功能特性
 
-- 🔍 **动漫作品搜索** — 通过关键字或 Bangumi ID 查找动漫作品
+- 🔍 **动漫作品搜索** — 优先从项目内置的 Anitabi 作品索引搜索名称，未命中时联网补充；也支持直接输入 Bangumi ID
 - 🗺️ **取景地地图浏览** — 在 Leaflet 交互地图上查看真实取景地，支持 CartoDB / 高德地图切换
 - 📸 **图像对比叠加** — 动画截图 vs 实地照片的并排对比，支持独立缩放/平移
 - ⭐ **跨作品坐标库** — 收藏来自不同动漫的取景地，构建个人巡礼清单
@@ -79,12 +79,57 @@ An interactive SPA for anime pilgrimage ("圣地巡礼") route planning — expl
 | 数据源 | 用途 | 说明 |
 |--------|------|------|
 | [Anitabi API](https://github.com/anitabi/anitabi.cn-document) | 动漫取景地经纬度、截图、集数信息 | 开源动漫巡礼数据库，感谢 [Anitabi 项目](https://anitabi.cn) 提供的公开 API |
-| [Bangumi API](https://bgm.tv/) | 动漫作品元数据搜索 | 中文 ACG 社区索引 |
+| [Anitabi 作品数据](https://www.anitabi.cn/d/g.json) / [Bangumi](https://bgm.tv/) | 本地作品索引与在线补充搜索 | 名称未命中时通过 Anitabi 的 Bangumi 搜索服务查询 |
 | [Tavily Search](https://tavily.com/) | 巡礼攻略联网检索 (Agent 模式) | AI 搜索引擎 |
 | [wttr.in](https://wttr.in/) | 目的地实时天气 | 免费天气 API |
 | MiMo v2.5 | 动漫截图视觉分析 (Agent 模式) | 小米多模态视觉模型 |
 
 > **关于 Anitabi**：本项目依赖的开源地标数据来自 [anitabi.cn](https://anitabi.cn)，其 API 文档和数据库维护在 [anitabi/anitabi.cn-document](https://github.com/anitabi/anitabi.cn-document)。该项目的公开 API 为本工具提供了所有取景地的经纬度、动画截图和集数对照信息。
+
+### 名称搜索缓存
+
+项目内置 Anitabi 作品数据快照，减少名称搜索对外部实时接口的依赖。2026-09-08 的初始快照包含 **1523 部作品**；后续更新后的数量和时间以索引文件中的 `entries`、`fetchedAt` 为准。
+
+| 文件 | 用途 |
+|------|------|
+| `data/anitabi-g.json` | 保存从 `https://www.anitabi.cn/d/g.json` 下载的原始 JSON 快照 |
+| `src/data/anitabi-search-index.json` | 提取名称、别名、ID、封面地址的轻量索引，记录来源、抓取时间和源数据版本，随前端打包 |
+| `src/utils/bangumiSearch.js` | 本地名称匹配、在线结果适配和搜索错误处理 |
+| `scripts/update-anitabi-cache.mjs` | 下载并校验源数据，同时更新原始快照和前端索引 |
+| `tests/bangumi-search.test.mjs` | 名称搜索回归测试 |
+
+搜索流程：
+
+```text
+输入作品名称
+  → 匹配项目内置索引
+      → 命中：直接返回候选作品，不发送在线搜索请求
+      → 未命中：通过 Anitabi 在线搜索补充候选作品
+  → 选中作品，取得 Bangumi ID
+  → 调用 Anitabi 地标 API，显示坐标点
+
+直接输入 Bangumi ID → 跳过名称搜索 → 调用 Anitabi 地标 API
+```
+
+本地搜索支持中文、日文、英文名称和别名，忽略大小写、空格及常见标点差异，完整名称优先。例如“你的名字。”、“君の名は。”和“YOUR NAME.”都能匹配 ID `160209`。在线搜索未完成时继续输入、收起结果或选择作品，会取消已过期的搜索请求，避免旧结果覆盖当前输入。
+
+缓存未命中时，前端请求 `/bgm/search?keyword=...&cat=2`，由 Vite 转发到 `https://v2-anitabi.magiconch.com/api/bgm/search`，其中 `cat=2` 表示动画。在线搜索失败时分别提示超时、限流、连接错误或响应格式异常；在线接口正常返回空数组时才显示未找到作品。
+
+**使用与更新：** 缓存已放入项目，首次使用无需下载作品索引，正常运行 `npm run dev` 即可；如果开发服务器在本次修改前已启动，请重启以加载新的代理配置。需要收录更新的作品时，手动运行：
+
+```bash
+# 更新原始快照及轻量索引
+npm run cache:anitabi
+
+# 验证本地命中、在线回退、错误提示及请求取消
+npm run test:search
+```
+
+下载或数据校验失败时保留现有缓存。更新缓存后，线上版本需要重新运行 `npm run build` 并部署；生产环境需为 `/bgm/` 配置与 Vite 相同的反向代理。
+
+**范围与限制：** 快照只覆盖 Anitabi 已收录的作品，不是 Bangumi 的全部作品库。名称命中本地缓存不依赖外部网络，但封面、坐标加载和在线补充搜索仍需联网；仅部署静态文件而不配置代理时，在线补充搜索不可用。源 JSON 和补充搜索接口为官网内部接口，未列入其稳定公开 API。
+
+数据来源为 Anitabi，作品元数据来自 Bangumi；外部数据遵循原来源的使用条款，不属于本项目代码的 MIT 授权。
 
 ---
 

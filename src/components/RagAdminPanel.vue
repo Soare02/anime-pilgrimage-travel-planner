@@ -3,15 +3,14 @@
     <!-- 顶部栏 -->
     <header class="admin-header">
       <div class="admin-header-left">
-        <button class="back-btn" @click="handleBack" title="返回地图">
+        <button class="back-btn" @click="handleBack" title="返回地图" aria-label="返回巡礼地图">
           <el-icon><ArrowLeft /></el-icon>
         </button>
-        <h1 class="admin-title">RAG 数据中心</h1>
+        <h1 class="admin-title">巡礼数据中心</h1>
         <span class="admin-subtitle">知识库管理与审核后台</span>
       </div>
       <div class="admin-header-right">
-        <div class="status-dot" :class="{ active: true }"></div>
-        <span class="status-text">系统运行中</span>
+        <span class="status-text">ANIME ATLAS / WORKSPACE</span>
       </div>
     </header>
 
@@ -1143,7 +1142,7 @@ onMounted(() => {
   z-index: 100;
   display: flex;
   flex-direction: column;
-  background: linear-gradient(135deg, #f0f4f8 0%, #e8eef5 50%, #dfe7f0 100%);
+  background: var(--bg-color);
   font-family: 'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', Arial, sans-serif;
 }
 
@@ -1197,7 +1196,7 @@ onMounted(() => {
 .admin-subtitle {
   font-size: 12px;
   color: var(--text-secondary);
-  background: rgba(9, 105, 218, 0.08);
+  background: rgba(60, 97, 75, 0.08);
   padding: 2px 10px;
   border-radius: 20px;
 }
@@ -1265,11 +1264,11 @@ onMounted(() => {
   position: relative;
 }
 .nav-item:hover {
-  background: rgba(9, 105, 218, 0.06);
+  background: rgba(60, 97, 75, 0.06);
   color: var(--text-color);
 }
 .nav-item.active {
-  background: rgba(9, 105, 218, 0.1);
+  background: rgba(60, 97, 75, 0.1);
   color: var(--primary-color);
   font-weight: 600;
 }
@@ -1389,13 +1388,13 @@ onMounted(() => {
 }
 .pending-card:hover {
   border-color: var(--primary-color);
-  box-shadow: 0 4px 16px rgba(9, 105, 218, 0.1);
+  box-shadow: 0 4px 16px rgba(60, 97, 75, 0.1);
   transform: translateY(-2px);
 }
 .pending-card.selected {
   border-color: var(--primary-color);
-  background: rgba(9, 105, 218, 0.04);
-  box-shadow: 0 0 0 2px rgba(9, 105, 218, 0.2);
+  background: rgba(60, 97, 75, 0.04);
+  box-shadow: 0 0 0 2px rgba(60, 97, 75, 0.2);
 }
 
 .pending-card-header {
@@ -1830,7 +1829,7 @@ onMounted(() => {
   color: var(--text-secondary);
   margin: -8px 0 16px;
   padding: 8px 12px;
-  background: rgba(9, 105, 218, 0.05);
+  background: rgba(60, 97, 75, 0.05);
   border-radius: 8px;
 }
 
@@ -1871,9 +1870,9 @@ onMounted(() => {
   transform: translateY(-1px);
 }
 .agent-run-card.active {
-  background: rgba(9, 105, 218, 0.08);
+  background: rgba(60, 97, 75, 0.08);
   border-color: var(--primary-color);
-  box-shadow: 0 0 0 2px rgba(9, 105, 218, 0.15);
+  box-shadow: 0 0 0 2px rgba(60, 97, 75, 0.15);
 }
 .agent-run-card.error {
   border-left: 3px solid #f56c6c;
@@ -1915,7 +1914,7 @@ onMounted(() => {
   margin-bottom: 4px;
   font-size: 11px;
   color: var(--primary-color);
-  background: rgba(9, 105, 218, 0.06);
+  background: rgba(60, 97, 75, 0.06);
   border-radius: 4px;
   padding: 3px 6px;
   overflow: hidden;
@@ -1958,8 +1957,8 @@ onMounted(() => {
 
 .trace-overview {
   padding: 12px 14px;
-  background: rgba(9, 105, 218, 0.04);
-  border: 1px solid rgba(9, 105, 218, 0.12);
+  background: rgba(60, 97, 75, 0.04);
+  border: 1px solid rgba(60, 97, 75, 0.12);
   border-radius: 10px;
   display: flex;
   flex-direction: column;
@@ -2007,7 +2006,7 @@ onMounted(() => {
   align-items: center;
   gap: 8px;
   padding: 10px 14px;
-  background: rgba(9, 105, 218, 0.06);
+  background: rgba(60, 97, 75, 0.06);
   border-bottom: 1px solid rgba(208, 215, 222, 0.3);
 }
 .node-group-icon {
@@ -2049,7 +2048,7 @@ onMounted(() => {
   font-size: 12px;
   margin-top: 2px;
 }
-.step-llm_call .step-marker { background: rgba(64, 158, 255, 0.15); color: #409eff; }
+.step-llm_call .step-marker { background: rgba(60, 97, 75, 0.15); color: #3c614b; }
 .step-tool_call .step-marker { background: rgba(103, 194, 58, 0.15); color: #67c23a; }
 .step-event .step-marker { background: rgba(230, 162, 60, 0.15); color: #e6a23c; }
 .step-status .step-marker { background: rgba(144, 147, 153, 0.15); color: #909399; }
@@ -2198,5 +2197,33 @@ onMounted(() => {
 .io-pre::-webkit-scrollbar-thumb {
   background: rgba(0, 0, 0, 0.12);
   border-radius: 3px;
+}
+
+.admin-header { height: 78px; background: var(--surface-color); border-color: var(--border-color); }
+.admin-title { font-weight: 600; letter-spacing: 1px; }
+.admin-subtitle { border-radius: 6px; font-size: 10px; padding: 5px 9px; }
+.status-text { font-size: 9px; letter-spacing: 1.7px; color: #8f9b82; }
+.admin-nav { background: #eef0e6; border-color: var(--border-color); }
+.admin-main { padding: 28px 32px; }
+.nav-item { font-size: 12px; padding: 14px; }
+.nav-item.active { background: #dfe8d5; }
+.pending-card, .db-landmark-card, .log-card, .recall-card, .agent-runs-pane, .agent-detail-pane { background: var(--surface-color); border-color: var(--border-color); }
+@media (max-width: 820px) {
+  .admin-header { height: 66px; padding: 0 16px; }
+  .admin-header-left { gap: 11px; }
+  .admin-title { font-size: 16px; }
+  .admin-subtitle, .admin-header-right { display: none; }
+  .admin-body { flex-direction: column; }
+  .admin-nav { flex-direction: row; overflow-x: auto; width: 100%; padding: 10px; border-right: 0; border-bottom: 1px solid var(--border-color); gap: 4px; }
+  .nav-item { font-size: 11px; padding: 10px 12px; white-space: nowrap; flex-shrink: 0; gap: 7px; }
+  .nav-item.active::before { display: none; }
+  .admin-main { padding: 20px 16px; }
+  .panel-header { flex-wrap: wrap; gap: 12px; }
+  .panel-title { font-size: 18px; }
+  .pending-grid { grid-template-columns: 1fr; }
+  .agent-layout { flex-direction: column; height: auto; }
+  .agent-runs-pane { width: 100%; max-height: 260px; }
+  .agent-detail-pane { min-height: 280px; }
+  .editor-modal { width: calc(100vw - 24px); }
 }
 </style>

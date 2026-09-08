@@ -1,10 +1,11 @@
 import axios from 'axios'
+import bangumiIndex from '../data/anitabi-search-index.json'
+import { createBangumiSearcher } from './bangumiSearch'
 
 const api = axios.create({
   timeout: 15000,
   headers: {
-    'Accept': 'application/json',
-    'User-Agent': 'AnimeTravel/1.0 (anime-travel-planner)'
+    'Accept': 'application/json'
   }
 })
 
@@ -161,22 +162,10 @@ export async function generateAIRoute(days, landmarks, aiConfig, onChunk) {
   }
 }
 
-export async function searchBangumiByKey(keyword) {
-  try {
-    const encoded = encodeURIComponent(keyword)
-    const url = `/bgm/search/subject/${encoded}?type=2&responseGroup=small&max_results=10`
-    const response = await api.get(url)
-    if (!response.data || !response.data.list) return []
-    return response.data.list.map(item => ({
-      id: item.id,
-      name: item.name,
-      name_cn: item.name_cn || '',
-      image: item.images ? (item.images.medium || item.images.common || '') : '',
-      air_date: item.air_date || '',
-      summary: item.summary || ''
-    }))
-  } catch (error) {
-    if (error.response && error.response.status === 404) return []
-    throw new Error('搜索作品失败，请稍后重试')
-  }
-}
+export const searchBangumiByKey = createBangumiSearcher(bangumiIndex.entries, async (keyword, { signal }) => {
+  const response = await api.get('/bgm/search', {
+    params: { keyword, cat: 2 },
+    signal
+  })
+  return response.data
+})
