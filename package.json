@@ -8,7 +8,9 @@
     "build": "vite build",
     "preview": "vite preview",
     "cache:anitabi": "node scripts/update-anitabi-cache.mjs",
-    "test:search": "node --test tests/bangumi-search.test.mjs"
+    "test:search": "node --test tests/bangumi-search.test.mjs",
+    "test:map": "node --test tests/anitabi-map-data.test.mjs",
+    "test:agent": "node --test tests/agent-sse.test.mjs"
   },
   "dependencies": {
     "vue": "^3.4.21",

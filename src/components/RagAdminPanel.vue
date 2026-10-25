@@ -7,10 +7,7 @@
           <el-icon><ArrowLeft /></el-icon>
         </button>
         <h1 class="admin-title">巡礼数据中心</h1>
-        <span class="admin-subtitle">知识库管理与审核后台</span>
-      </div>
-      <div class="admin-header-right">
-        <span class="status-text">ANIME ATLAS / WORKSPACE</span>
+        <span class="admin-subtitle">知识库与追踪管理</span>
       </div>
     </header>
 
@@ -1195,10 +1192,11 @@ onMounted(() => {
 
 .admin-subtitle {
   font-size: 12px;
-  color: var(--text-secondary);
-  background: rgba(60, 97, 75, 0.08);
-  padding: 2px 10px;
-  border-radius: 20px;
+  color: var(--primary-color);
+  background: var(--primary-soft);
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-weight: 500;
 }
 
 .admin-header-right {
@@ -1264,11 +1262,11 @@ onMounted(() => {
   position: relative;
 }
 .nav-item:hover {
-  background: rgba(60, 97, 75, 0.06);
+  background: rgba(15, 23, 42, 0.04);
   color: var(--text-color);
 }
 .nav-item.active {
-  background: rgba(60, 97, 75, 0.1);
+  background: var(--primary-soft);
   color: var(--primary-color);
   font-weight: 600;
 }
@@ -1388,13 +1386,13 @@ onMounted(() => {
 }
 .pending-card:hover {
   border-color: var(--primary-color);
-  box-shadow: 0 4px 16px rgba(60, 97, 75, 0.1);
+  box-shadow: 0 4px 16px rgba(37, 99, 235, 0.1);
   transform: translateY(-2px);
 }
 .pending-card.selected {
   border-color: var(--primary-color);
-  background: rgba(60, 97, 75, 0.04);
-  box-shadow: 0 0 0 2px rgba(60, 97, 75, 0.2);
+  background: rgba(37, 99, 235, 0.04);
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.2);
 }
 
 .pending-card-header {
@@ -1825,11 +1823,11 @@ onMounted(() => {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-secondary);
   margin: -8px 0 16px;
   padding: 8px 12px;
-  background: rgba(60, 97, 75, 0.05);
+  background: var(--primary-soft);
   border-radius: 8px;
 }
 
@@ -1870,9 +1868,9 @@ onMounted(() => {
   transform: translateY(-1px);
 }
 .agent-run-card.active {
-  background: rgba(60, 97, 75, 0.08);
+  background: var(--primary-soft);
   border-color: var(--primary-color);
-  box-shadow: 0 0 0 2px rgba(60, 97, 75, 0.15);
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.15);
 }
 .agent-run-card.error {
   border-left: 3px solid #f56c6c;
@@ -1888,14 +1886,14 @@ onMounted(() => {
   margin-bottom: 6px;
 }
 .run-steps-count {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-secondary);
 }
 .run-card-meta {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-secondary);
   margin-bottom: 4px;
 }
@@ -1912,9 +1910,9 @@ onMounted(() => {
 }
 .run-card-tools {
   margin-bottom: 4px;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--primary-color);
-  background: rgba(60, 97, 75, 0.06);
+  background: var(--primary-soft);
   border-radius: 4px;
   padding: 3px 6px;
   overflow: hidden;
@@ -1923,7 +1921,7 @@ onMounted(() => {
 }
 .more-tag {
   color: var(--primary-color);
-  font-size: 10px;
+  font-size: 11px;
   margin-left: 2px;
 }
 .run-card-error {
@@ -1957,8 +1955,8 @@ onMounted(() => {
 
 .trace-overview {
   padding: 12px 14px;
-  background: rgba(60, 97, 75, 0.04);
-  border: 1px solid rgba(60, 97, 75, 0.12);
+  background: rgba(37, 99, 235, 0.04);
+  border: 1px solid rgba(37, 99, 235, 0.12);
   border-radius: 10px;
   display: flex;
   flex-direction: column;
@@ -1978,7 +1976,7 @@ onMounted(() => {
 }
 .overview-code {
   font-family: 'SF Mono', 'Consolas', monospace;
-  font-size: 11px;
+  font-size: 12px;
   background: rgba(0, 0, 0, 0.05);
   padding: 1px 6px;
   border-radius: 4px;
@@ -2006,7 +2004,7 @@ onMounted(() => {
   align-items: center;
   gap: 8px;
   padding: 10px 14px;
-  background: rgba(60, 97, 75, 0.06);
+  background: var(--primary-soft);
   border-bottom: 1px solid rgba(208, 215, 222, 0.3);
 }
 .node-group-icon {
@@ -2019,7 +2017,7 @@ onMounted(() => {
   flex: 1;
 }
 .node-group-count {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-secondary);
 }
 
@@ -2048,12 +2046,12 @@ onMounted(() => {
   font-size: 12px;
   margin-top: 2px;
 }
-.step-llm_call .step-marker { background: rgba(60, 97, 75, 0.15); color: #3c614b; }
-.step-tool_call .step-marker { background: rgba(103, 194, 58, 0.15); color: #67c23a; }
-.step-event .step-marker { background: rgba(230, 162, 60, 0.15); color: #e6a23c; }
-.step-status .step-marker { background: rgba(144, 147, 153, 0.15); color: #909399; }
+.step-llm_call .step-marker { background: var(--primary-soft); color: var(--primary-color); }
+.step-tool_call .step-marker { background: rgba(16, 185, 129, 0.15); color: #10b981; }
+.step-event .step-marker { background: rgba(245, 158, 11, 0.15); color: #f59e0b; }
+.step-status .step-marker { background: rgba(148, 163, 184, 0.15); color: #64748b; }
 .step-node_start .step-marker,
-.step-node_end .step-marker { background: rgba(230, 162, 60, 0.15); color: #e6a23c; }
+.step-node_end .step-marker { background: rgba(245, 158, 11, 0.15); color: #f59e0b; }
 
 .step-body {
   flex: 1;
@@ -2199,23 +2197,19 @@ onMounted(() => {
   border-radius: 3px;
 }
 
-.admin-header { height: 78px; background: var(--surface-color); border-color: var(--border-color); }
-.admin-title { font-weight: 600; letter-spacing: 1px; }
-.admin-subtitle { border-radius: 6px; font-size: 10px; padding: 5px 9px; }
-.status-text { font-size: 9px; letter-spacing: 1.7px; color: #8f9b82; }
-.admin-nav { background: #eef0e6; border-color: var(--border-color); }
+.admin-header { height: 68px; background: var(--glass-bg); border-color: var(--glass-border); }
+.admin-title { font-weight: 600; letter-spacing: 0.5px; }
+.admin-nav { background: var(--glass-bg-subtle); border-color: var(--border-color); }
 .admin-main { padding: 28px 32px; }
-.nav-item { font-size: 12px; padding: 14px; }
-.nav-item.active { background: #dfe8d5; }
-.pending-card, .db-landmark-card, .log-card, .recall-card, .agent-runs-pane, .agent-detail-pane { background: var(--surface-color); border-color: var(--border-color); }
+.nav-item { font-size: 13px; padding: 12px 14px; }
 @media (max-width: 820px) {
-  .admin-header { height: 66px; padding: 0 16px; }
+  .admin-header { height: 60px; padding: 0 16px; }
   .admin-header-left { gap: 11px; }
   .admin-title { font-size: 16px; }
-  .admin-subtitle, .admin-header-right { display: none; }
+  .admin-subtitle { display: none; }
   .admin-body { flex-direction: column; }
   .admin-nav { flex-direction: row; overflow-x: auto; width: 100%; padding: 10px; border-right: 0; border-bottom: 1px solid var(--border-color); gap: 4px; }
-  .nav-item { font-size: 11px; padding: 10px 12px; white-space: nowrap; flex-shrink: 0; gap: 7px; }
+  .nav-item { font-size: 13px; padding: 10px 12px; white-space: nowrap; flex-shrink: 0; gap: 7px; }
   .nav-item.active::before { display: none; }
   .admin-main { padding: 20px 16px; }
   .panel-header { flex-wrap: wrap; gap: 12px; }

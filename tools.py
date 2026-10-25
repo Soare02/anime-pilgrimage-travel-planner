@@ -2,6 +2,9 @@ import os
 import re
 import json
 import html
+import datetime
+import math
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import parse_qs, unquote, urlparse
 from dotenv import load_dotenv
@@ -34,10 +37,49 @@ _mimo_client = None
 # 一旦确认缺少 key，置位此 flag，避免每个地标重复尝试初始化并 raise
 _mimo_unavailable = False
 
+
+def _positive_float_env(name: str, default: float) -> float:
+    try:
+        value = float(os.getenv(name, default))
+        return value if math.isfinite(value) and value > 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _failure_code(exc: BaseException) -> str:
+    name = type(exc).__name__.lower()
+    if isinstance(exc, (requests.exceptions.Timeout, TimeoutError)) or "timeout" in name:
+        return "TOOL_TIMEOUT"
+    if isinstance(exc, requests.exceptions.ConnectionError) or "connection" in name:
+        return "TOOL_UNAVAILABLE"
+    return "TOOL_ERROR"
+
+
+def _record_tool_failure(tool_name: str, exc: BaseException, started_at: float = None) -> str:
+    code = _failure_code(exc)
+    try:
+        import agent_trace
+        agent_trace.record_exception(tool_name, exc, code=code, started_at=started_at)
+    except Exception:
+        pass
+    return code
+
+
+def _tavily_search(client, **kwargs):
+    attempts = min(parse_int_env("TAVILY_MAX_RETRIES", 1, min_value=0), 2) + 1
+    for attempt in range(attempts):
+        try:
+            return client.search(**kwargs)
+        except Exception as exc:
+            if _failure_code(exc) not in {"TOOL_TIMEOUT", "TOOL_UNAVAILABLE"} or attempt + 1 >= attempts:
+                raise
+            time.sleep(0.2 * (attempt + 1))
+    return {}
+
 def _build_tavily_client(api_key: str):
     if TavilyClient is None:
         raise RuntimeError("未安装 tavily 依赖。")
-    return TavilyClient(api_key=api_key)
+    return TavilyClient(api_key=api_key, timeout=max(1, int(_positive_float_env("TAVILY_TIMEOUT_SECONDS", 10.0))))
 
 def _get_mimo_client():
     global _mimo_client
@@ -46,8 +88,8 @@ def _get_mimo_client():
         base_url = os.getenv("MIMO_BASE_URL", "https://token-plan-cn.xiaomimimo.com/v1")
         if not api_key:
             raise ValueError(MIMO_NO_KEY_SUFFIX)
-        # max_retries=0：失败已由调用方优雅处理，重试无收益且放大延迟（30s→90s）
-        _mimo_client = OpenAI(api_key=api_key, base_url=base_url, timeout=30.0, max_retries=0)
+        # 显式超时与至多一次 SDK 重试，避免单张图片长期阻塞。
+        _mimo_client = OpenAI(api_key=api_key, base_url=base_url, timeout=_positive_float_env("MIMO_TIMEOUT_SECONDS", 20.0), max_retries=1)
     return _mimo_client
 
 @tool
@@ -57,10 +99,10 @@ def get_weather(city: str) -> str:
     """
     # API端点，我们请求JSON格式的数据
     url = f"https://wttr.in/{city}?format=j1"
-    
+    started_at = time.monotonic()
     try:
         # 发起网络请求
-        response = requests.get(url)
+        response = requests.get(url, timeout=_positive_float_env("WEATHER_TIMEOUT_SECONDS", 6.0))
         # 检查响应状态码是否为200 (成功)
         response.raise_for_status() 
         # 解析返回的JSON数据
@@ -72,14 +114,16 @@ def get_weather(city: str) -> str:
         temp_c = current_condition['temp_C']
         
         # 格式化成自然语言返回
-        return f"{city}当前天气:{weather_desc}，气温{temp_c}摄氏度"
+        queried_at = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+        return f"{city}当前天气:{weather_desc}，气温{temp_c}摄氏度（查询时间：{queried_at}，仅供当前参考）"
         
     except requests.exceptions.RequestException as e:
-        # 处理网络错误
-        return f"错误:查询天气时遇到网络问题 - {e}"
-    except (KeyError, IndexError) as e:
+        code = _record_tool_failure("get_weather", e, started_at)
+        return f"错误:[{code}] 查询天气失败 - {e}"
+    except (KeyError, IndexError, ValueError) as e:
         # 处理数据解析错误
-        return f"错误:解析天气数据失败，可能是城市名称无效 - {e}"
+        _record_tool_failure("get_weather", e, started_at)
+        return f"错误:[TOOL_INVALID_RESPONSE] 解析天气数据失败 - {e}"
 
 @tool
 def get_time()-> str:
@@ -99,19 +143,18 @@ def get_attraction(city: str, weather: str) -> str:
     # 1. 从环境变量中读取API密钥
     api_key = os.getenv("TAVILY_API_KEY")
     if not api_key:
-        return "错误:未配置TAVILY_API_KEY环境变量。"
+        return "错误:[TOOL_UNCONFIGURED] 未配置TAVILY_API_KEY环境变量。"
 
     # 2. 初始化Tavily客户端
     if TavilyClient is None:
-        return "错误:未安装 tavily 依赖，无法执行景点联网搜索。"
-    tavily = _build_tavily_client(api_key)
-    
+        return "错误:[TOOL_UNCONFIGURED] 未安装 tavily 依赖，无法执行景点联网搜索。"
     # 3. 构造一个精确的查询
     query = f"'{city}' 在'{weather}'天气下最值得去的旅游景点推荐及理由"
-    
+    started_at = time.monotonic()
     try:
+        tavily = _build_tavily_client(api_key)
         # 4. 调用API，include_answer=True会返回一个综合性的回答
-        response = tavily.search(
+        response = _tavily_search(tavily,
             query=query,
             **get_tavily_search_kwargs(search_depth="basic", include_answer=True)
         )
@@ -132,7 +175,8 @@ def get_attraction(city: str, weather: str) -> str:
         return "根据搜索，为您找到以下信息:\n" + "\n".join(formatted_results)
 
     except Exception as e:
-        return f"错误:执行Tavily搜索时出现问题 - {e}"
+        code = _record_tool_failure("get_attraction", e, started_at)
+        return f"错误:[{code}] 执行Tavily搜索失败 - {e}"
 
 
 ANIME_SCENE_NOISE_PATTERNS = (
@@ -300,7 +344,7 @@ def _bing_html_search(query: str, max_results: int = 5):
         )
         resp.raise_for_status()
     except Exception as e:
-        return [], f"Bing请求失败: {e}"
+        return [], f"[{_record_tool_failure('get_anime_scene', e)}] Bing请求失败: {e}"
 
     page = resp.text
     results = []
@@ -346,7 +390,7 @@ def _duckduckgo_html_search(query: str, max_results: int = 5):
         )
         response.raise_for_status()
     except Exception as e:
-        return [], f"DDG请求失败: {e}"
+        return [], f"[{_record_tool_failure('get_anime_scene', e)}] DDG请求失败: {e}"
 
     page = response.text
     # 直接匹配 result__a 链接，兼容 href/class 属性顺序和单双引号差异。
@@ -462,7 +506,7 @@ def _fetch_page_content(url: str, timeout: float = 8.0) -> tuple:
             resp.encoding = resp.apparent_encoding or "utf-8"
         return _html_to_main_text(resp.text), None
     except Exception as e:
-        return "", f"页面抓取失败: {e}"
+        return "", f"[{_record_tool_failure('get_anime_scene', e)}] 页面抓取失败: {e}"
 
 
 def _baidu_html_search(query: str, max_results: int = 5):
@@ -482,7 +526,7 @@ def _baidu_html_search(query: str, max_results: int = 5):
         )
         resp.raise_for_status()
     except Exception as e:
-        return [], f"Baidu请求失败: {e}"
+        return [], f"[{_record_tool_failure('get_anime_scene', e)}] Baidu请求失败: {e}"
 
     page = resp.text
     if len(page) < 1000:  # 反爬降级页（227 字节 JS 跳转）
@@ -556,7 +600,8 @@ def _direct_web_search(
             try:
                 results, err = future.result()
             except Exception as e:
-                query_errors.append((f"{engine_name}/{label}", f"异常: {e}"))
+                code = _record_tool_failure("get_anime_scene", e)
+                query_errors.append((f"{engine_name}/{label}", f"[{code}] 异常: {e}"))
                 continue
             if err:
                 query_errors.append((f"{engine_name}/{label}", err))
@@ -584,7 +629,11 @@ def _direct_web_search(
             future_to_item = {executor.submit(_fetch_page_content, it["url"]): it for it in top}
             for future in as_completed(future_to_item):
                 item = future_to_item[future]
-                content, err = future.result()
+                try:
+                    content, err = future.result()
+                except Exception as e:
+                    code = _record_tool_failure("get_anime_scene", e)
+                    content, err = "", f"[{code}] 页面抓取失败: {e}"
                 if err:
                     query_errors.append((item["_label"], err))
                 elif content and len(content) > len(item.get("content", "")):
@@ -643,10 +692,11 @@ def get_anime_scene(
     backend = _resolve_anime_scene_backend()
     if backend == "tavily":
         if not api_key:
-            return "错误:未配置TAVILY_API_KEY环境变量，且 ANIME_SCENE_BACKEND=tavily。"
+            return "错误:[TOOL_UNCONFIGURED] 未配置TAVILY_API_KEY环境变量，且 ANIME_SCENE_BACKEND=tavily。"
         if TavilyClient is None:
-            return "错误:未安装 tavily 依赖，且 ANIME_SCENE_BACKEND=tavily。"
+            return "错误:[TOOL_UNCONFIGURED] 未安装 tavily 依赖，且 ANIME_SCENE_BACKEND=tavily。"
 
+    started_at = time.monotonic()
     try:
         queries = _build_anime_scene_queries(
             anime_title=anime_title,
@@ -671,7 +721,8 @@ def get_anime_scene(
             with ThreadPoolExecutor(max_workers=min(len(queries), 4)) as executor:
                 future_to_label = {
                     executor.submit(
-                        tavily.search,
+                        _tavily_search,
+                        tavily,
                         query=query,
                         **get_tavily_search_kwargs(
                             search_depth="advanced",
@@ -687,7 +738,8 @@ def get_anime_scene(
                     try:
                         responses.append((label, query, future.result()))
                     except Exception as e:
-                        query_errors.append((label, str(e)))
+                        code = _record_tool_failure("get_anime_scene", e, started_at)
+                        query_errors.append((label, f"[{code}] {e}"))
 
             for label, query, response in responses:
                 answer = response.get("answer")
@@ -731,7 +783,8 @@ def get_anime_scene(
                     try:
                         ddg_results, ddg_error = future.result()
                     except Exception as e:
-                        ddg_results, ddg_error = [], f"DDG异常: {e}"
+                        code = _record_tool_failure("get_anime_scene", e, started_at)
+                        ddg_results, ddg_error = [], f"[{code}] DDG异常: {e}"
                     if ddg_error:
                         query_errors.append((f"DDG/{label}", ddg_error))
                         continue
@@ -755,6 +808,9 @@ def get_anime_scene(
 
         if not formatted:
             searched = "\n".join(f"- {label}: {query}" for label, query in queries)
+            if query_errors:
+                code = "TOOL_TIMEOUT" if any("TOOL_TIMEOUT" in str(error) for _, error in query_errors) else "TOOL_ERROR"
+                return f"错误:[{code}] 场景检索不可用。{extra}\n已尝试以下查询:\n{searched}"
             return (
                 f"未找到《{anime_title}》{episode}中{location_name}的相关场景信息。\n"
                 f"已尝试以下查询:\n{searched}{extra}"
@@ -764,7 +820,8 @@ def get_anime_scene(
         return f"为您找到以下场景信息（查询策略: {searched}）:\n{formatted}"
 
     except Exception as e:
-        return f"错误:搜索场景信息时出现问题 - {e}"
+        code = _record_tool_failure("get_anime_scene", e, started_at)
+        return f"错误:[{code}] 搜索场景信息失败 - {e}"
 
 
 TOOLS = [get_weather, get_attraction, get_anime_scene]
@@ -782,6 +839,7 @@ def analyze_anime_scene_image(image_url: str, location_name: str, anime_title: s
         extra_context: 额外的文字上下文（RAG/Tavily 检索结果摘要）
     """
     global _mimo_unavailable
+    started_at = time.monotonic()
     # 若此前已确认缺少 key，直接快速返回，避免重复 raise（每地标都触发）
     if _mimo_unavailable:
         return f"{MIMO_ERROR_PREFIX} {MIMO_NO_KEY_SUFFIX}"
@@ -790,7 +848,10 @@ def analyze_anime_scene_image(image_url: str, location_name: str, anime_title: s
         client = _get_mimo_client()
     except ValueError as e:
         _mimo_unavailable = True
-        return f"{MIMO_ERROR_PREFIX} {str(e)}"
+        return f"{MIMO_ERROR_PREFIX} [TOOL_UNCONFIGURED] {str(e)}"
+    except Exception as e:
+        code = _record_tool_failure("analyze_anime_scene_image", e, started_at)
+        return f"{MIMO_ERROR_PREFIX} [{code}] {str(e)}"
 
     model = os.getenv("MIMO_MODEL", "mimo-v2.5")
 
@@ -803,10 +864,10 @@ def analyze_anime_scene_image(image_url: str, location_name: str, anime_title: s
 1. lighting: 光线特征（逆光/顺光/侧光/金色暖光/冷色蓝调/阴天漫射光…）
 2. time_of_day: 画面时段（清晨/上午/正午/午后/黄昏/夜晚）
 3. season: 季节特征（春樱/夏绿/秋红叶/冬雪/室内无季节）
-4. camera_angle: 拍摄角度（仰角/俯角/平视）和大致朝向（面朝东/西/南/北…）
+4. camera_angle: 仅描述画面可观察的仰角/俯角/平视，不根据单张截图推断绝对方位
 5. key_elements: 画面核心元素（建筑风格、植被、标志物、角色站位…）
 6. composition: 构图分析（画面各元素的相对位置）
-7. photo_guide: 还原此镜头的拍摄建议（站位、焦段、角度、注意事项）
+7. photo_guide: 根据可见构图提出拍摄建议；现实站位、方位及剧情若无可靠文字资料需标注未核实
 
 请务必只返回 JSON 块。"""
 
@@ -844,10 +905,11 @@ def analyze_anime_scene_image(image_url: str, location_name: str, anime_title: s
                     if val:
                         lines.append(f"- {label}: {val}")
                 if lines:
-                    return "\n".join(lines)
+                    return "[图像观察与拍摄建议，实地站位及剧情未核实]\n" + "\n".join(lines)
             except Exception:
                 pass
 
-        return raw
+        return "[图像观察与拍摄建议，实地站位及剧情未核实]\n" + raw
     except Exception as e:
-        return f"{MIMO_ERROR_PREFIX} {str(e)}"
+        code = _record_tool_failure("analyze_anime_scene_image", e, started_at)
+        return f"{MIMO_ERROR_PREFIX} [{code}] {str(e)}"

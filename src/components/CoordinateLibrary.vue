@@ -1,40 +1,33 @@
 <template>
   <div class="coordinate-library">
-    <header class="library-heading">
-      <span class="eyebrow">{{
-        activeTab === 'library'
-          ? 'COLLECT MOMENTS, MAKE MEMORIES'
-          : 'PAGES FROM YOUR JOURNEY'
-      }}</span>
-      <h1>
-        {{ activeTab === 'library' ? '我的巡礼' : '旅途档案' }}<span>.</span>
-      </h1>
+    <header class="library-header">
+      <h1>{{ activeTab === 'library' ? '我的巡礼清单' : '旅途档案' }}</h1>
       <p>
         {{
           activeTab === 'library'
-            ? '把想去的地方，连成自己的故事。'
-            : '每一次出发，都值得好好珍藏。'
+            ? '管理已收藏的取景地标，由 AI 规划多日行程'
+            : '回顾已生成的巡礼路线与历史规划记录'
         }}
       </p>
     </header>
 
     <!-- 坐标库 -->
     <template v-if="activeTab === 'library'">
-      <div v-if="coordinateLibrary.length === 0" class="lib-empty">
+      <div v-if="coordinateLibrary.length === 0 && !currentPlan" class="lib-empty">
         <div class="empty-illustration">
-          <span></span><AppIcon name="bookmark" :size="38" /><span></span>
+          <AppIcon name="bookmark" :size="28" />
         </div>
-        <span class="eyebrow">A BLANK PAGE, A NEW ADVENTURE</span>
-        <h2>旅程，从一处心动开始</h2>
-        <p>在地图或场景卡片上收藏喜欢的地标，<br />它们会在这里等你出发。</p>
+        <h2>暂无收藏地标</h2>
+        <p>在探索面板或地图上收藏感兴趣的地标后，即可在此规划行程。</p>
         <button class="primary-button" @click="emit('explore')">
-          去发现圣地 <AppIcon name="arrow" :size="16" />
+          去发现圣地
+          <AppIcon name="arrow" :size="16" />
         </button>
       </div>
 
       <template v-else>
         <div class="lib-body-scroll">
-          <div class="lib-toolbar">
+          <div v-if="coordinateLibrary.length" class="lib-toolbar">
             <el-checkbox
               :model-value="
                 coordinateLibrary.length > 0 &&
@@ -50,10 +43,9 @@
               全选
             </el-checkbox>
             <div class="lib-toolbar-actions">
-              <span class="selection-count"
-                >已选 {{ librarySelected.length }} /
-                {{ coordinateLibrary.length }}</span
-              >
+              <span class="selection-count">
+                已选 {{ librarySelected.length }} / {{ coordinateLibrary.length }}
+              </span>
               <el-button
                 text
                 size="small"
@@ -66,7 +58,7 @@
             </div>
           </div>
 
-          <div class="lib-list">
+          <div v-if="coordinateLibrary.length" class="lib-list">
             <div
               v-for="entry in coordinateLibrary"
               :key="entry.id"
@@ -83,16 +75,20 @@
                 <img
                   :src="getThumbUrl(entry.image)"
                   :alt="entry.name"
+                  referrerpolicy="no-referrer"
                   loading="lazy"
                 />
               </div>
               <div class="lib-thumb placeholder" v-else>
-                <el-icon :size="14"><Star /></el-icon>
+                <el-icon :size="15"><Star /></el-icon>
               </div>
               <button class="lib-info" @click="focusLandmark(entry)">
                 <div class="lib-name">{{ entry.name }}</div>
                 <div class="lib-source" v-if="entry.bangumiName">
                   {{ entry.bangumiName }}
+                </div>
+                <div v-if="!hasValidGeo(entry)" class="lib-missing-geo">
+                  缺少坐标，无法参与路线规划
                 </div>
               </button>
               <el-button
@@ -107,16 +103,22 @@
             </div>
           </div>
 
-          <div class="lib-controls">
+          <div v-if="coordinateLibrary.length" class="lib-controls">
             <div class="planner-heading">
-              <AppIcon name="sparkles" :size="18" />
-              <div>
-                <strong>把下一站，交给 AI</strong
-                ><small>根据所选地标，为你安排巡礼路线</small>
+              <div class="planner-title">
+                <AppIcon name="sparkles" :size="16" />
+                <strong>AI 路线规划</strong>
               </div>
+              <button
+                class="planner-settings text-button"
+                @click="store.settingsOpen = true"
+              >
+                {{ getSchemeLabel(store.aiConfig.scheme) }}
+                <AppIcon name="settings" :size="13" />
+              </button>
             </div>
             <div class="lib-days-row">
-              <span class="lib-label">这次，想旅行几天？</span>
+              <span class="lib-label">出行天数</span>
               <el-input-number
                 v-model="libraryDays"
                 :min="1"
@@ -128,22 +130,18 @@
             </div>
             <el-button
               type="primary"
-              size="small"
               @click="handleGenerate"
               :loading="planning"
               :disabled="librarySelected.length === 0 || (loading && !planning)"
             >
-              <AppIcon v-if="!planning" name="sparkles" :size="15" />{{
-                planning ? '正在编排旅程…' : '生成我的巡礼路线'
-              }}
+              <AppIcon v-if="!planning" name="sparkles" :size="15" />
+              {{ planning ? '正在编排旅程…' : '生成巡礼路线' }}
             </el-button>
-            <button
-              class="planner-settings text-button"
-              @click="store.settingsOpen = true"
-            >
-              {{ getSchemeLabel(store.aiConfig.scheme) }}
-              <AppIcon name="settings" :size="12" />
-            </button>
+          </div>
+
+          <div v-if="!coordinateLibrary.length && currentPlan" class="plan-no-library">
+            历史行程已从保存的地标快照恢复。
+            <button class="text-button" @click="emit('explore')">继续发现地标</button>
           </div>
 
           <div v-if="store.error && !planning" class="lib-ai-error">
@@ -154,9 +152,23 @@
               :closable="false"
             />
           </div>
-          <div v-if="libraryAiResponse || planning" class="lib-ai-response">
+          <div v-if="store.historySaveError" class="lib-ai-error">
+            <el-alert :title="store.historySaveError" type="warning" show-icon :closable="false" />
+          </div>
+          <div v-if="planning && store.planningProgress" class="plan-progress" role="status">
+            <el-icon class="is-loading" :size="16"><Loading /></el-icon>
+            <span>{{ store.planningProgress }}</span>
+            <button class="text-button" @click="store.cancelLibraryItinerary()">取消</button>
+          </div>
+          <PlanResult
+            v-if="currentPlan"
+            :plan="currentPlan"
+            :landmarks="generatedLandmarks"
+            @select-point="focusPlanPoint"
+          />
+          <div v-if="libraryAiResponse || (planning && !store.planningProgress)" class="lib-ai-response">
             <div class="lib-ai-header">
-              <span class="lib-ai-badge">AI 路线规划</span>
+              <span class="lib-ai-badge">AI 行程说明</span>
               <div class="lib-ai-header-actions">
                 <el-button
                   v-if="parsedAiResponse.cleanMarkdown"
@@ -189,11 +201,11 @@
 
             <!-- AI Planning Timeline Steps Loader -->
             <div
-              v-if="planning && !parsedAiResponse.cleanMarkdown"
+              v-if="planning && !parsedAiResponse.cleanMarkdown && !store.planningProgress"
               class="ai-status-loader"
             >
               <div class="status-spinner-row">
-                <el-icon class="is-loading" :size="20"><Loading /></el-icon>
+                <el-icon class="is-loading" :size="18"><Loading /></el-icon>
                 <span class="status-title">AI 正在规划中...</span>
               </div>
               <div class="status-steps">
@@ -244,7 +256,7 @@
                   }"
                 >
                   <span class="step-dot"></span>
-                  <span class="step-text">动漫原作名场面还原匹配</span>
+                  <span class="step-text">动漫原作场景还原匹配</span>
                 </div>
                 <div
                   class="status-step"
@@ -259,7 +271,7 @@
                   }"
                 >
                   <span class="step-dot"></span>
-                  <span class="step-text">检查行程与整理手帖</span>
+                  <span class="step-text">检查行程与整理</span>
                 </div>
               </div>
               <div
@@ -285,23 +297,21 @@
     <template v-if="activeTab === 'history'">
       <div v-if="routeHistory.length === 0" class="lib-empty">
         <div class="empty-illustration">
-          <span></span><AppIcon name="clock" :size="38" /><span></span>
+          <AppIcon name="clock" :size="28" />
         </div>
-        <span class="eyebrow">THE FIRST CHAPTER IS YOURS</span>
-        <h2>你的故事，待续</h2>
-        <p>
-          生成的巡礼路线会自动收录在这里。<br />下一次出发，从翻开手帖开始。
-        </p>
+        <h2>暂无旅途档案</h2>
+        <p>生成的巡礼路线会自动保存在这里，方便随时查看。</p>
         <button class="primary-button" @click="store.activePanel = 'library'">
-          规划第一段旅程 <AppIcon name="arrow" :size="16" />
+          去规划行程
+          <AppIcon name="arrow" :size="16" />
         </button>
       </div>
 
       <template v-else>
         <div class="lib-toolbar">
-          <span class="lib-history-count"
-            >{{ routeHistory.length }} 条记录</span
-          >
+          <span class="lib-history-count">
+            共 {{ routeHistory.length }} 条记录
+          </span>
           <div class="lib-toolbar-actions">
             <el-button text size="small" type="danger" @click="handleClearAll">
               清空全部
@@ -325,18 +335,18 @@
               @keydown.space.self.prevent="toggleExpand(record)"
             >
               <div class="history-info">
-                <div style="display: flex; align-items: center; gap: 6px">
-                  <span class="history-time">{{
-                    formatTimestamp(record.timestamp)
-                  }}</span>
+                <div class="history-title-row">
+                  <span class="history-time">
+                    {{ formatTimestamp(record.timestamp) }}
+                  </span>
                   <span :class="['scheme-badge', record.scheme || 'cloud']">
                     {{ getSchemeLabel(record.scheme) }}
                   </span>
                 </div>
-                <span class="history-meta"
-                  >{{ record.days }}天 ·
-                  {{ record.landmarks.length }}个地点</span
-                >
+                <span class="history-meta">
+                  {{ record.days }} 天 ·
+                  {{ (record.landmarkSnapshot || record.landmarks || []).length }} 个地点
+                </span>
               </div>
               <div class="history-actions">
                 <el-button
@@ -344,8 +354,9 @@
                   size="small"
                   type="danger"
                   @click.stop="handleDelete(record.id)"
-                  >删除</el-button
                 >
+                  删除
+                </el-button>
                 <el-icon
                   class="history-arrow"
                   :class="{ rotated: expandedId === record.id }"
@@ -356,14 +367,20 @@
             </div>
 
             <div v-if="expandedId === record.id" class="history-body">
+              <PlanResult
+                v-if="record.plan"
+                :plan="record.plan"
+                :landmarks="record.landmarkSnapshot || record.plan.request_snapshot?.landmarks || []"
+                @select-point="focusPlanPoint"
+              />
               <div
-                v-if="expandedCache[record.id]?.loading"
+                v-if="!record.plan && expandedCache[record.id]?.loading"
                 class="history-loading"
               >
                 <el-icon class="is-loading"><Loading /></el-icon>
                 <span>加载地标信息...</span>
               </div>
-              <template v-else-if="expandedCache[record.id]?.landmarkList">
+              <template v-else-if="!record.plan && expandedCache[record.id]?.landmarkList">
                 <div class="history-landmarks">
                   <div class="history-section-title">地标列表</div>
                   <div
@@ -374,31 +391,26 @@
                   >
                     <span class="hl-index">{{ idx + 1 }}</span>
                     <div class="hl-info">
-                      <span class="hl-name">{{
-                        pt.cn || pt.name || pt.id
-                      }}</span>
+                      <span class="hl-name">
+                        {{ pt.cn || pt.name || pt.id }}
+                      </span>
                       <span class="hl-meta" v-if="pt.ep || pt.s">
                         <template v-if="pt.ep">EP{{ pt.ep }}</template>
-                        <template v-if="pt.s">
-                          · {{ formatSeconds(pt.s) }}</template
-                        >
+                        <template v-if="pt.s"> · {{ formatSeconds(pt.s) }}</template>
                       </span>
                     </div>
-                    <el-icon class="hl-go" @click.stop="showHistoryImage(pt)"
-                      ><View
-                    /></el-icon>
+                    <el-icon class="hl-go" @click.stop="showHistoryImage(pt)">
+                      <View />
+                    </el-icon>
                   </div>
                 </div>
               </template>
 
               <div
-                v-if="expandedCache[record.id]?.failedCount"
+                v-if="!record.plan && expandedCache[record.id]?.failedCount"
                 class="history-failed-warn"
               >
-                注意：{{
-                  expandedCache[record.id].failedCount
-                }}
-                个地标信息加载失败
+                注意：{{ expandedCache[record.id].failedCount }} 个地标信息加载失败
               </div>
 
               <div class="history-ai-response" v-if="record.aiResponse">
@@ -450,14 +462,15 @@
     <div v-if="historyImageUrl">
       <div class="history-image-wrapper">
         <img
-          :src="historyImageUrl.replace('?plan=h160', '?plan=h360')"
+          :src="getImageUrl(historyImageUrl, 'h360')"
           :alt="historyImageName"
+          referrerpolicy="no-referrer"
           class="history-image"
         />
       </div>
       <div class="history-compare-row">
         <button class="history-compare-btn" @click="handleHistoryCompare">
-          对比
+          取景对比
         </button>
       </div>
     </div>
@@ -487,10 +500,9 @@
           >
             <div class="expanded-thumb" v-if="lm.image">
               <img
-                :src="
-                  lm.image.includes('?') ? lm.image : lm.image + '?plan=h360'
-                "
+                :src="getImageUrl(lm.image, 'h360')"
                 :alt="lm.name"
+                referrerpolicy="no-referrer"
                 loading="lazy"
               />
             </div>
@@ -530,7 +542,9 @@ import { useAppStore } from '../stores/app'
 import { storeToRefs } from 'pinia'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import AppIcon from './AppIcon.vue'
+import PlanResult from './PlanResult.vue'
 import { fetchBangumiLite, fetchBangumiPointsDetail } from '../utils/api'
+import { getImageUrl } from '../utils/imageUrl'
 
 const store = useAppStore()
 const {
@@ -540,7 +554,8 @@ const {
   loading,
   planning,
   routeHistory,
-  generatedLandmarks
+  generatedLandmarks,
+  currentPlan
 } = storeToRefs(store)
 const emit = defineEmits(['explore', 'show-map'])
 
@@ -635,6 +650,16 @@ function getSchemeLabel(scheme) {
   }
 }
 
+function hasValidGeo(entry) {
+  return (
+    Array.isArray(entry.geo) &&
+    entry.geo.length === 2 &&
+    entry.geo.every(Number.isFinite) &&
+    Math.abs(entry.geo[0]) <= 90 &&
+    Math.abs(entry.geo[1]) <= 180
+  )
+}
+
 const libraryDays = storeToRefs(store).libraryDays
 
 const activeTab = computed(() =>
@@ -667,6 +692,15 @@ function toggleExpand(record) {
     return
   }
   expandedId.value = record.id
+  store.restoreRouteHistory(record)
+  if (record.plan) {
+    expandedCache[record.id] = {
+      loading: false,
+      landmarkList: record.landmarkSnapshot || record.plan.request_snapshot?.landmarks || [],
+      failedCount: 0
+    }
+    return
+  }
   if (expandedCache[record.id]) return
   expandedCache[record.id] = { loading: true, landmarkList: [] }
   loadHistoryDetail(record)
@@ -700,11 +734,11 @@ async function loadHistoryDetail(record) {
             bangumiId
           })
         } else {
-          missedCount++ // API 返回了但未找到该 point（可能被移除）
+          missedCount++
         }
       })
     } catch {
-      failedCount += pointIds.length // 整组 API 调用失败
+      failedCount += pointIds.length
     }
   }
 
@@ -793,6 +827,11 @@ function focusLandmark(entry) {
   emit('show-map')
 }
 
+function focusPlanPoint(point) {
+  store.selectPoint(point.id)
+  emit('show-map')
+}
+
 async function handleGenerate() {
   await store.generateLibraryItinerary()
 }
@@ -811,9 +850,7 @@ async function handleRemoveSelected() {
     )
     store.libraryRemoveSelected()
     ElMessage.success('已删除选中的坐标')
-  } catch {
-    // 用户取消删除
-  }
+  } catch {}
 }
 
 async function handleCopy() {
@@ -832,36 +869,29 @@ async function handleCopy() {
 }
 
 function getThumbUrl(imageUrl) {
-  if (!imageUrl) return ''
-  if (imageUrl.includes('?')) return imageUrl
-  return imageUrl + '?plan=h160'
+  return getImageUrl(imageUrl, 'h160')
 }
 
 function renderMarkdown(text) {
   if (!text) return ''
 
-  // Filter out status lines
   const cleanText = text
     .split('\n')
     .filter((line) => !line.startsWith('__STATUS__:'))
     .join('\n')
 
-  // 转义 HTML
   const escaped = cleanText
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
 
-  // 先处理行内格式（加粗）
   let html = escaped.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
 
-  // 按空行分割成块
   const blocks = html.split(/\n\n+/)
   const out = blocks.map((block) => {
     block = block.trim()
     if (!block) return ''
 
-    // 标题：仅取首行为标题，剩余行作正文（避免同块内容被吞进标题标签）
     if (/^### /.test(block)) {
       const nl = block.indexOf('\n')
       if (nl === -1) return `<h4>${block.slice(4)}</h4>`
@@ -880,14 +910,12 @@ function renderMarkdown(text) {
 
     const lines = block.split('\n')
 
-    // 无序列表（所有行都以 - 开头）
     if (lines.every((l) => /^\- /.test(l))) {
       return (
         '<ul>' + lines.map((l) => `<li>${l.slice(2)}</li>`).join('') + '</ul>'
       )
     }
 
-    // 有序列表（所有行都以数字.开头）
     if (lines.every((l) => /^\d+\.\s/.test(l))) {
       return (
         '<ol>' +
@@ -896,7 +924,6 @@ function renderMarkdown(text) {
       )
     }
 
-    // 普通段落（内部换行用 <br>）
     return `<p>${lines.filter((l) => l.trim()).join('<br>')}</p>`
   })
 
@@ -912,19 +939,68 @@ function renderMarkdown(text) {
   min-width: 0;
   min-height: 0;
   overflow: hidden;
-  padding-top: 8px;
+}
+
+.library-header {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-bottom: 16px;
+  flex-shrink: 0;
+}
+
+.library-header h1 {
+  font-size: 19px;
+  font-weight: 600;
+  color: var(--text-color);
+  letter-spacing: 0.3px;
+}
+
+.library-header p {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.5;
 }
 
 .lib-empty {
   display: flex;
   flex: 1;
-  min-height: 260px;
+  min-height: 240px;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  padding: 26px 8px 48px;
+  padding: 24px 16px;
   color: var(--text-secondary);
   text-align: center;
+}
+
+.empty-illustration {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 64px;
+  height: 64px;
+  background: var(--primary-soft);
+  border-radius: 18px;
+  color: var(--primary-color);
+  margin-bottom: 18px;
+}
+
+.lib-empty h2 {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-color);
+  margin-bottom: 8px;
+}
+
+.lib-empty p {
+  font-size: 13px;
+  line-height: 1.6;
+  max-width: 240px;
+}
+
+.lib-empty .primary-button {
+  margin-top: 20px;
 }
 
 .lib-toolbar {
@@ -940,27 +1016,39 @@ function renderMarkdown(text) {
 .lib-toolbar-actions {
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 8px;
+}
+
+.selection-count {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.lib-toolbar :deep(.el-checkbox__label) {
+  font-size: 13px;
+  color: var(--text-color);
 }
 
 .lib-list {
-  padding: 5px 0;
+  padding: 8px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 
 .lib-item {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 12px 5px;
-  border-radius: 8px;
-  border-bottom: 1px solid var(--border-color);
+  padding: 10px 8px;
+  border-radius: 10px;
   transition:
-    background 0.2s,
-    opacity 0.2s;
+    background 0.18s ease,
+    opacity 0.18s ease;
 }
 
 .lib-item:hover {
-  background-color: rgba(60, 97, 75, 0.08);
+  background-color: rgba(255, 255, 255, 0.7);
 }
 
 .lib-item.unchecked {
@@ -969,17 +1057,18 @@ function renderMarkdown(text) {
 
 .lib-thumb {
   flex-shrink: 0;
-  width: 54px;
+  width: 56px;
   height: 42px;
-  border-radius: 7px;
+  border-radius: 8px;
   overflow: hidden;
-  background: var(--primary-soft);
+  background: rgba(15, 23, 42, 0.05);
 }
 
 .lib-thumb.placeholder {
   display: flex;
   align-items: center;
   justify-content: center;
+  color: var(--text-muted);
 }
 
 .lib-thumb img {
@@ -999,50 +1088,77 @@ function renderMarkdown(text) {
 }
 
 .lib-name {
-  font-size: 12px;
-  font-weight: 550;
+  font-size: 13px;
+  font-weight: 500;
   color: var(--text-color);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  line-height: 1.5;
+  line-height: 1.4;
 }
 
 .lib-source {
-  font-size: 9px;
+  font-size: 12px;
   color: var(--text-secondary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  margin-top: 2px;
+}
+
+.lib-missing-geo {
   margin-top: 4px;
+  color: #d97706;
+  font-size: 12px;
 }
 
 .lib-remove-btn {
   flex-shrink: 0;
-  opacity: 0.45;
+  opacity: 0.5;
   transition: opacity 0.2s;
-  padding: 2px !important;
+  padding: 4px !important;
   height: 28px !important;
 }
 
-.lib-item:hover .lib-remove-btn {
-  opacity: 0.7;
+.lib-item:hover .lib-remove-btn,
+.lib-remove-btn:focus-visible {
+  opacity: 0.85;
 }
 
 .lib-remove-btn:hover {
   opacity: 1 !important;
-  color: #f56c6c !important;
+  color: var(--el-color-danger) !important;
 }
 
 .lib-controls {
   display: flex;
   flex-direction: column;
-  gap: 16px;
-  padding: 20px 16px 14px;
-  border: 1px solid #dce4d0;
-  border-radius: 13px;
-  background: #edf1e4;
-  margin: 20px 0 14px;
+  gap: 14px;
+  padding: 16px;
+  border: 1px solid var(--border-color);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.72);
+  margin: 12px 0;
+}
+
+.planner-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+}
+
+.planner-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--primary-color);
+  font-size: 14px;
+}
+
+.planner-settings {
+  font-size: 12px;
 }
 
 .lib-days-row {
@@ -1054,40 +1170,36 @@ function renderMarkdown(text) {
 }
 
 .lib-label {
-  font-size: 11px;
-  color: #738365;
-  flex-shrink: 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.lib-controls :deep(.el-input-number) {
+  width: 110px;
+}
+
+.lib-controls > .el-button {
+  min-height: 40px;
+  width: 100%;
+  font-size: 14px;
+}
+
+.lib-controls > .el-button :deep(span) {
+  gap: 6px;
 }
 
 .lib-body-scroll {
   flex: 1;
   overflow-y: auto;
   min-height: 0;
-  padding-right: 3px;
+  padding-right: 4px;
   overscroll-behavior: contain;
 }
 
-.lib-body-scroll::-webkit-scrollbar {
-  width: 6px;
-}
-
-.lib-body-scroll::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.lib-body-scroll::-webkit-scrollbar-thumb {
-  background-color: rgba(0, 0, 0, 0.15);
-  border-radius: 3px;
-}
-
-.lib-body-scroll::-webkit-scrollbar-thumb:hover {
-  background-color: rgba(0, 0, 0, 0.25);
-}
-
 .lib-ai-response {
-  padding: 20px 0 10px;
-  border-top: 1px dashed #d2dcc5;
-  margin-top: 18px;
+  padding: 16px 0 8px;
+  border-top: 1px solid var(--border-color);
+  margin-top: 16px;
 }
 
 .lib-ai-header {
@@ -1095,38 +1207,47 @@ function renderMarkdown(text) {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  margin-bottom: 8px;
+  margin-bottom: 10px;
 }
 
 .lib-ai-badge {
   display: inline-flex;
   align-items: center;
-  padding: 5px 9px;
-  border-radius: 5px;
-  font-size: 10px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 12px;
   font-weight: 600;
   color: var(--primary-color);
   background: var(--primary-soft);
 }
 
-.lib-copy-btn {
+.lib-ai-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
   margin-left: auto;
+}
+
+.lib-copy-btn,
+.lib-expand-btn {
   color: var(--text-secondary) !important;
   transition: color 0.2s;
 }
 
-.lib-copy-btn:hover {
-  color: #3c614b !important;
+.lib-copy-btn:hover,
+.lib-expand-btn:hover {
+  color: var(--primary-color) !important;
 }
 
 .lib-ai-content {
   font-size: 13px;
   line-height: 1.7;
   color: var(--text-color);
+  overflow-wrap: anywhere;
 }
 
 .lib-ai-content :deep(h2) {
-  font-size: 16px;
+  font-size: 15px;
   font-weight: 600;
   margin: 12px 0 6px;
   color: var(--text-color);
@@ -1165,21 +1286,9 @@ function renderMarkdown(text) {
   margin: 2px 0;
 }
 
-/* Tabs */
-.lib-tab.active::after {
-  content: '';
-  position: absolute;
-  bottom: 0;
-  left: 20%;
-  width: 60%;
-  height: 2px;
-  background: var(--primary-color);
-  border-radius: 1px;
-}
-
 /* History */
 .lib-history-count {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-secondary);
 }
 
@@ -1187,44 +1296,55 @@ function renderMarkdown(text) {
   overflow-y: auto;
   flex: 1;
   min-height: 0;
-  padding: 12px 3px 12px 0;
+  padding: 12px 4px 12px 0;
 }
 
 .history-item {
   border: 1px solid var(--border-color);
-  border-radius: 11px;
-  background: var(--surface-color);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.72);
   overflow: hidden;
-  margin-bottom: 12px;
+  margin-bottom: 10px;
 }
 
 .history-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 15px 12px;
+  padding: 14px;
   gap: 8px;
   cursor: pointer;
+  transition: background 0.15s ease;
 }
 
 .history-header:hover {
-  background-color: rgba(60, 97, 75, 0.06);
+  background-color: rgba(255, 255, 255, 0.92);
+}
+
+.history-header:focus-visible {
+  outline-offset: -3px;
 }
 
 .history-info {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 4px;
+}
+
+.history-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .history-time {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-color);
-  font-weight: 500;
+  font-weight: 600;
 }
 
 .history-meta {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-secondary);
 }
 
@@ -1246,7 +1366,7 @@ function renderMarkdown(text) {
 
 .history-body {
   border-top: 1px solid var(--border-color);
-  padding: 10px 12px;
+  padding: 12px 14px;
 }
 
 .history-loading {
@@ -1260,7 +1380,7 @@ function renderMarkdown(text) {
 }
 
 .history-section-title {
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 600;
   color: var(--text-color);
 }
@@ -1269,7 +1389,7 @@ function renderMarkdown(text) {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 6px;
+  margin-bottom: 8px;
 }
 
 .history-landmarks {
@@ -1279,29 +1399,29 @@ function renderMarkdown(text) {
 .history-landmark-item {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 8px;
-  border-radius: 6px;
+  gap: 10px;
+  padding: 8px;
+  border-radius: 8px;
   cursor: pointer;
   transition: background-color 0.15s;
 }
 
 .history-landmark-item:hover {
-  background-color: rgba(60, 97, 75, 0.1);
+  background-color: var(--primary-soft);
 }
 
 .hl-index {
   flex-shrink: 0;
-  width: 20px;
-  height: 20px;
+  width: 22px;
+  height: 22px;
   border-radius: 50%;
   background: var(--primary-color);
-  color: white;
+  color: #ffffff;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 10px;
-  font-weight: bold;
+  font-size: 11px;
+  font-weight: 600;
 }
 
 .hl-info {
@@ -1312,7 +1432,7 @@ function renderMarkdown(text) {
 }
 
 .hl-name {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-color);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1320,24 +1440,24 @@ function renderMarkdown(text) {
 }
 
 .hl-meta {
-  font-size: 10px;
+  font-size: 12px;
   color: var(--text-secondary);
-  margin-top: 1px;
+  margin-top: 2px;
 }
 
 .hl-go {
-  font-size: 14px;
+  font-size: 15px;
   color: var(--text-secondary);
   opacity: 0;
   transition: opacity 0.15s;
 }
 
 .history-landmark-item:hover .hl-go {
-  opacity: 0.7;
+  opacity: 0.8;
 }
 
 .history-ai-response {
-  margin-top: 4px;
+  margin-top: 8px;
 }
 
 .history-image-wrapper {
@@ -1349,32 +1469,30 @@ function renderMarkdown(text) {
 .history-compare-row {
   display: flex;
   justify-content: center;
-  padding: 8px 0 2px;
+  padding: 12px 0 4px;
 }
 
 .history-compare-btn {
-  height: 16px;
-  line-height: 16px;
-  padding: 0 14px;
-  border: 1px solid rgba(60, 97, 75, 0.4);
-  background: rgba(60, 97, 75, 0.15);
+  padding: 6px 16px;
+  border: 1px solid rgba(37, 99, 235, 0.25);
+  background: var(--primary-soft);
   color: var(--primary-color);
-  font-size: 11px;
-  border-radius: 4px;
+  font-size: 13px;
+  font-weight: 500;
+  border-radius: 8px;
   cursor: pointer;
-  font-family: inherit;
   transition: all 0.15s;
 }
 
 .history-compare-btn:hover {
   background: var(--primary-color);
-  color: white;
+  color: #ffffff;
 }
 
 .history-image {
   max-width: 100%;
   max-height: 60vh;
-  border-radius: 6px;
+  border-radius: 10px;
   object-fit: contain;
 }
 
@@ -1388,49 +1506,27 @@ function renderMarkdown(text) {
   font-size: 13px;
 }
 
-:deep(.el-dialog) {
-  background: var(--sidebar-bg);
-  border: 1px solid var(--border-color);
-  border-radius: 12px;
-}
-
-:deep(.el-dialog__title) {
-  color: var(--text-color);
-  font-size: 15px;
-}
-
-:deep(.el-dialog__headerbtn .el-dialog__close) {
-  color: var(--text-secondary);
-}
-
-:deep(.el-dialog__body) {
-  padding: 12px 20px 20px;
-}
-
 .scheme-badge {
-  font-size: 10px;
-  padding: 1px 5px;
-  border-radius: 4px;
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: 6px;
   font-weight: 500;
-  line-height: 1.2;
+  line-height: 1.3;
 }
 
 .scheme-badge.cloud {
-  background-color: rgba(60, 97, 75, 0.08);
-  color: #3c614b;
-  border: 1px solid rgba(60, 97, 75, 0.2);
+  background-color: var(--primary-soft);
+  color: var(--primary-color);
 }
 
 .scheme-badge.local {
-  background-color: rgba(230, 162, 60, 0.08);
-  color: #b06000;
-  border: 1px solid rgba(230, 162, 60, 0.2);
+  background-color: rgba(245, 158, 11, 0.12);
+  color: #d97706;
 }
 
 .scheme-badge.agent {
-  background-color: rgba(103, 194, 58, 0.08);
-  color: #1a7f37;
-  border: 1px solid rgba(103, 194, 58, 0.2);
+  background-color: rgba(16, 185, 129, 0.12);
+  color: #059669;
 }
 
 /* AI Stream Planning progress status loader styling */
@@ -1438,18 +1534,17 @@ function renderMarkdown(text) {
   display: flex;
   flex-direction: column;
   padding: 16px;
-  background: rgba(60, 97, 75, 0.04);
+  background: rgba(255, 255, 255, 0.65);
   border-radius: 12px;
-  border: 1px dashed rgba(60, 97, 75, 0.25);
+  border: 1px solid var(--border-color);
   margin: 12px 0;
-  box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.01);
 }
 
 .status-spinner-row {
   display: flex;
   align-items: center;
   gap: 10px;
-  margin-bottom: 20px;
+  margin-bottom: 16px;
 }
 
 .status-title {
@@ -1461,10 +1556,10 @@ function renderMarkdown(text) {
 .status-steps {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 14px;
   position: relative;
   padding-left: 20px;
-  margin-bottom: 16px;
+  margin-bottom: 12px;
 }
 
 .status-steps::before {
@@ -1492,24 +1587,21 @@ function renderMarkdown(text) {
   width: 12px;
   height: 12px;
   border-radius: 50%;
-  background: var(--sidebar-bg);
+  background: #ffffff;
   border: 2px solid var(--border-color);
-  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: all 0.3s ease;
 }
 
 .step-text {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-secondary);
   transition: all 0.3s ease;
 }
 
-/* Active step styles */
 .status-step.active .step-dot {
   border-color: var(--primary-color);
   background: var(--primary-color);
-  box-shadow: 0 0 8px rgba(60, 97, 75, 0.5);
-  transform: scale(1.1);
-  animation: pulse-border 2s infinite;
+  box-shadow: 0 0 8px rgba(37, 99, 235, 0.4);
 }
 
 .status-step.active .step-text {
@@ -1517,57 +1609,24 @@ function renderMarkdown(text) {
   font-weight: 600;
 }
 
-/* Completed step styles */
 .status-step.completed .step-dot {
-  border-color: #67c23a;
-  background: #67c23a;
-  box-shadow: none;
+  border-color: #10b981;
+  background: #10b981;
 }
 
 .status-step.completed .step-text {
-  color: #67c23a;
+  color: var(--text-color);
 }
 
 .status-current-detail {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-secondary);
-  background: rgba(0, 0, 0, 0.02);
+  background: rgba(15, 23, 42, 0.03);
   padding: 8px 12px;
-  border-radius: 6px;
-  border: 1px solid var(--border-color);
-  font-style: italic;
-  margin-top: 8px;
+  border-radius: 8px;
+  margin-top: 6px;
   word-break: break-all;
-  line-height: 1.4;
-}
-
-@keyframes pulse-border {
-  0% {
-    box-shadow: 0 0 0 0 rgba(60, 97, 75, 0.4);
-  }
-  70% {
-    box-shadow: 0 0 0 6px rgba(60, 97, 75, 0);
-  }
-  100% {
-    box-shadow: 0 0 0 0 rgba(60, 97, 75, 0);
-  }
-}
-
-/* Expand button group */
-.lib-ai-header-actions {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  margin-left: auto;
-}
-
-.lib-expand-btn {
-  color: var(--text-secondary) !important;
-  transition: color 0.2s;
-}
-
-.lib-expand-btn:hover {
-  color: var(--primary-color) !important;
+  line-height: 1.5;
 }
 
 /* Expanded fullscreen view */
@@ -1603,22 +1662,13 @@ function renderMarkdown(text) {
   padding-right: 4px;
 }
 
-.expanded-landmark-list::-webkit-scrollbar {
-  width: 6px;
-}
-
-.expanded-landmark-list::-webkit-scrollbar-thumb {
-  background-color: rgba(0, 0, 0, 0.15);
-  border-radius: 3px;
-}
-
 .expanded-landmark-item {
   display: flex;
   gap: 12px;
   padding: 10px;
   border: 1px solid var(--border-color);
-  border-radius: 8px;
-  background: var(--card-bg);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.72);
   align-items: center;
   transition: border-color 0.2s;
 }
@@ -1628,12 +1678,12 @@ function renderMarkdown(text) {
 }
 
 .expanded-thumb {
-  width: 100px;
-  height: 64px;
+  width: 96px;
+  height: 62px;
   flex-shrink: 0;
-  border-radius: 6px;
+  border-radius: 8px;
   overflow: hidden;
-  background: var(--sidebar-bg);
+  background: rgba(15, 23, 42, 0.05);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1661,11 +1711,11 @@ function renderMarkdown(text) {
   font-size: 13px;
   font-weight: 600;
   color: var(--text-color);
-  line-height: 1.3;
+  line-height: 1.4;
 }
 
 .expanded-lm-bangumi {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-secondary);
 }
 
@@ -1676,182 +1726,69 @@ function renderMarkdown(text) {
   padding-right: 8px;
 }
 
-.expanded-right::-webkit-scrollbar {
-  width: 6px;
-}
-
-.expanded-right::-webkit-scrollbar-thumb {
-  background-color: rgba(0, 0, 0, 0.15);
-  border-radius: 3px;
-}
-
 .expanded-right .lib-ai-content {
   font-size: 14px;
   line-height: 1.8;
 }
 
-:deep(.el-dialog.is-fullscreen) {
-  background: var(--sidebar-bg);
-}
-
-.lib-ai-error {
-  margin-top: 8px;
-}
-
-.lib-ai-error :deep(.el-alert__content) {
-  font-size: 12px;
-}
-
-.history-failed-warn {
-  font-size: 11px;
-  color: #e6a23c;
-  background: rgba(230, 162, 60, 0.08);
-  padding: 6px 10px;
-  border-radius: 6px;
-  margin-bottom: 8px;
-}
-
-.library-heading {
-  padding: 2px 0 25px;
-  flex-shrink: 0;
-}
-.library-heading .eyebrow {
-  font-size: 8px;
-  letter-spacing: 1.3px;
-}
-.library-heading h1 {
-  font-size: 32px;
-  font-weight: 600;
-  letter-spacing: 2px;
-  line-height: 1.5;
-  margin: 20px 0 8px;
-}
-.library-heading h1 > span {
-  color: var(--accent-color);
-  margin-left: 4px;
-}
-.library-heading p {
-  font-size: 11px;
-  color: var(--text-secondary);
-  line-height: 1.8;
-}
-.empty-illustration {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 20px;
-  width: 134px;
-  height: 134px;
-  background: #e9eee0;
-  border: 1px dashed #cad6be;
-  border-radius: 50%;
-  color: #7d916b;
-  margin-bottom: 28px;
-  transform: rotate(-8deg);
-}
-.empty-illustration span {
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: #bdc8a8;
-}
-.lib-empty .eyebrow {
-  font-size: 7px;
-  letter-spacing: 1.3px;
-}
-.lib-empty h2 {
-  font-size: 17px;
-  font-weight: 550;
-  color: var(--text-color);
-  margin: 13px 0;
-}
-.lib-empty p {
-  font-size: 11px;
-  line-height: 2;
-}
-.lib-empty .primary-button {
-  margin-top: 25px;
-}
-.selection-count {
-  font-size: 9px;
-  color: #8d987f;
-}
-.lib-toolbar :deep(.el-checkbox__label) {
-  font-size: 11px;
-  color: var(--text-secondary);
-}
-.lib-toolbar :deep(.el-button) {
-  font-size: 10px;
-  padding: 4px 5px;
-}
-.planner-heading {
-  display: flex;
-  align-items: flex-start;
-  gap: 9px;
-  width: 100%;
-  color: var(--primary-color);
-}
-.planner-heading strong {
-  font-size: 12px;
-  font-weight: 600;
-  display: block;
-}
-.planner-heading small {
-  font-size: 9px;
-  margin-top: 7px;
-  display: block;
-  color: #889779;
-}
-.lib-controls :deep(.el-input-number) {
-  width: 104px;
-}
-.lib-controls > .el-button {
-  min-height: 40px;
-  width: 100%;
-  font-size: 11px;
-}
-.lib-controls > .el-button :deep(span) {
-  gap: 7px;
-}
-.planner-settings {
-  font-size: 9px;
-  margin-top: -6px;
-  padding: 2px 0;
-  color: #7e8f70;
-}
 .lib-ai-error {
   margin: 10px 0;
 }
+
 .lib-ai-error :deep(.el-alert) {
-  padding: 10px;
+  border-radius: 10px;
 }
-.lib-remove-btn:focus-visible {
-  opacity: 1;
+
+.history-failed-warn {
+  font-size: 12px;
+  color: #d97706;
+  background: rgba(245, 158, 11, 0.1);
+  padding: 8px 12px;
+  border-radius: 8px;
+  margin-bottom: 8px;
 }
-.history-header:focus-visible {
-  outline-offset: -3px;
+
+.plan-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0;
+  padding: 10px 12px;
+  border: 1px solid rgba(37, 99, 235, 0.2);
+  border-radius: 10px;
+  background: var(--primary-soft);
+  color: var(--primary-color);
+  font-size: 13px;
 }
-.lib-ai-content {
-  overflow-wrap: anywhere;
+
+.plan-progress span {
+  flex: 1;
+  min-width: 0;
 }
+
+.plan-progress button {
+  flex-shrink: 0;
+}
+
+.plan-no-library {
+  padding: 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.65);
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.plan-no-library button {
+  color: var(--primary-color);
+}
+
 @media (max-width: 820px) {
-  .library-heading {
-    padding-bottom: 22px;
-  }
-  .library-heading h1 {
-    margin-top: 14px;
-  }
   .lib-empty {
     overflow-y: auto;
     min-height: 200px;
-    padding: 15px 0 30px;
-    justify-content: flex-start;
-  }
-  .empty-illustration {
-    width: 110px;
-    height: 110px;
-    flex-shrink: 0;
-    margin-bottom: 23px;
+    padding: 20px 0;
   }
   .expanded-view {
     flex-direction: column;
@@ -1869,7 +1806,7 @@ function renderMarkdown(text) {
     padding: 0;
   }
   .expanded-thumb {
-    width: 70px;
+    width: 72px;
     height: 48px;
   }
 }

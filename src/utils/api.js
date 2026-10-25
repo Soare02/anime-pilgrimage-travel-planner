@@ -1,6 +1,7 @@
 import axios from 'axios'
 import bangumiIndex from '../data/anitabi-search-index.json'
 import { createBangumiSearcher } from './bangumiSearch'
+import { createAnitabiMapClient } from './anitabiMapData'
 
 const api = axios.create({
   timeout: 15000,
@@ -9,45 +10,15 @@ const api = axios.create({
   }
 })
 
-function handleError(error, subjectID) {
-  if (error.response) {
-    const status = error.response.status
-    if (status === 404) {
-      throw new Error(`未找到 ID 为 ${subjectID} 的作品巡礼数据，请确认 Bangumi ID 是否正确`)
-    }
-    if (status === 429) {
-      throw new Error('请求过于频繁，请稍后再试')
-    }
-    throw new Error(`服务器返回错误 (${status})`)
-  }
-  if (error.code === 'ECONNABORTED') {
-    throw new Error('请求超时，请检查网络连接后重试')
-  }
-  throw new Error('网络请求失败，请检查网络连接')
-}
+const mapData = createAnitabiMapClient(async (file, version) => {
+  const response = await api.get(`/anitabi-data/${file}`, {
+    params: { v: version || Math.floor(Date.now() / (30 * 60 * 1000)) }
+  })
+  return response.data
+})
 
-export async function fetchBangumiLite(subjectID) {
-  try {
-    const url = `https://api.anitabi.cn/bangumi/${subjectID}/lite`
-    const response = await api.get(url)
-    return response.data
-  } catch (error) {
-    handleError(error, subjectID)
-  }
-}
-
-export async function fetchBangumiPointsDetail(subjectID, haveImage = false) {
-  try {
-    let url = `https://api.anitabi.cn/bangumi/${subjectID}/points/detail`
-    if (haveImage) {
-      url += '?haveImage=true'
-    }
-    const response = await api.get(url)
-    return response.data
-  } catch (error) {
-    handleError(error, subjectID)
-  }
-}
+export const fetchBangumiLite = mapData.fetchBangumiLite
+export const fetchBangumiPointsDetail = mapData.fetchBangumiPointsDetail
 
 
 function formatTimestamp(seconds) {
@@ -59,61 +30,193 @@ function formatTimestamp(seconds) {
   return `${m}:${String(s).padStart(2, '0')}`
 }
 
-export async function generateAIRoute(days, landmarks, aiConfig, onChunk) {
-  const { url, apiKey, model } = aiConfig
-  const isAgent = url.includes('/api/agent')
+export class AgentRouteError extends Error {
+  constructor(message, code = 'AGENT_ERROR', details = null) {
+    super(message)
+    this.name = 'AgentRouteError'
+    this.code = code
+    this.details = details
+  }
+}
 
-  if (isAgent) {
+const agentErrorMessages = {
+  INVALID_INPUT: '选中的地点或天数无效，请检查后重试',
+  MODEL_OUTPUT_INVALID: '智能体生成的数据无法解析，请重试',
+  MISSING_LANDMARK: '有选中的地点未被安排',
+  DUPLICATE_LANDMARK: '行程中有重复的地点',
+  UNKNOWN_LANDMARK: '行程中出现了未选中的地点',
+  DAY_COUNT_MISMATCH: '行程天数与请求不一致',
+  TOOL_TIMEOUT: '资料查询超时，请稍后重试',
+  MODEL_TIMEOUT: '智能体规划超时，请稍后重试',
+  RUN_CANCELLED: '已取消路线规划'
+}
+
+function agentError(payload = {}) {
+  const code = payload.code || 'AGENT_ERROR'
+  return new AgentRouteError(payload.message || agentErrorMessages[code] || '智能体规划失败', code, payload)
+}
+
+async function responseError(response, serviceName) {
+  const body = await response.text()
+  let data
+  try { data = JSON.parse(body) } catch { data = null }
+  const detail = data?.detail
+  const firstDetail = Array.isArray(detail) ? detail[0] : detail
+  const message = data?.message || (typeof detail === 'string' ? detail : firstDetail?.message || firstDetail?.msg) || body.trim()
+  const code = data?.code || firstDetail?.code || (response.status === 422 ? 'INVALID_INPUT' : 'HTTP_ERROR')
+  return new AgentRouteError(`${serviceName}返回错误 (${response.status})：${message || response.statusText}`, code, data)
+}
+
+function parseSseEvent(block) {
+  const data = block.split(/\r\n|\n|\r/)
+    .filter(line => line.startsWith('data:'))
+    .map(line => line.slice(5).trimStart())
+    .join('\n')
+  if (!data) return null
+  let event
+  try { event = JSON.parse(data) } catch {
+    throw new AgentRouteError('智能体返回了无法解析的事件数据', 'MODEL_OUTPUT_INVALID')
+  }
+  if (!event || !event.event_id || !event.run_id || !event.type || !event.payload || typeof event.payload !== 'object' || Array.isArray(event.payload)) {
+    throw new AgentRouteError('智能体返回了不完整的事件数据', 'MODEL_OUTPUT_INVALID')
+  }
+  return event
+}
+
+async function readAgentEvents(response, onEvent, signal) {
+  if (!response.body) {
+    throw new AgentRouteError('智能体没有返回事件流', 'EVENT_STREAM_INCOMPLETE')
+  }
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder('utf-8')
+  let buffer = ''
+  let runId = null
+  let plan = null
+  let planEventType = null
+  let text = ''
+  let status = null
+  let reportedError = null
+  let started = false
+
+  function accept(block) {
+    const event = parseSseEvent(block)
+    if (!event) return
+    if (runId && event.run_id !== runId) {
+      throw new AgentRouteError('智能体事件的运行编号不一致', 'EVENT_STREAM_INVALID')
+    }
+    if (!runId) runId = event.run_id
+    if (status) {
+      throw new AgentRouteError('智能体在结束事件后仍返回数据', 'EVENT_STREAM_INVALID')
+    }
+    if (event.type === 'run_started') started = true
+    if (event.type === 'plan_ready' || event.type === 'plan_draft') {
+      plan = event.payload.plan || null
+      planEventType = event.type
+      text = typeof event.payload.text === 'string' ? event.payload.text : ''
+    } else if (event.type === 'error') {
+      reportedError = agentError(event.payload)
+    } else if (event.type === 'run_finished') {
+      status = event.payload.status
+      if (!['success', 'failed', 'cancelled'].includes(status)) {
+        throw new AgentRouteError('智能体返回了无效的结束状态', 'EVENT_STREAM_INVALID')
+      }
+    }
+    onEvent?.(event)
+  }
+
+  function consume() {
+    let match
+    while ((match = /\r\n\r\n|\n\n|\r\r/.exec(buffer))) {
+      const block = buffer.slice(0, match.index)
+      buffer = buffer.slice(match.index + match[0].length)
+      accept(block)
+    }
+  }
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      consume()
+      if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
+    }
+    buffer += decoder.decode()
+    consume()
+    if (buffer.trim()) {
+      throw new AgentRouteError('智能体事件流在事件中途断开', 'EVENT_STREAM_INCOMPLETE')
+    }
+    if (!started || !status) {
+      throw new AgentRouteError('智能体事件流未正常结束', 'EVENT_STREAM_INCOMPLETE')
+    }
+    if (status === 'cancelled') throw agentError({ code: 'RUN_CANCELLED' })
+    if (status === 'success' && (planEventType !== 'plan_ready' || !plan || plan.status !== 'complete' || plan.validation?.passed !== true)) {
+      throw new AgentRouteError('智能体没有交付通过校验的完整行程', 'MODEL_OUTPUT_INVALID')
+    }
+    if (status === 'failed' && plan && (planEventType !== 'plan_draft' || plan.status !== 'draft' || plan.validation?.passed !== false)) {
+      throw new AgentRouteError('智能体草案状态与运行结果不一致', 'EVENT_STREAM_INVALID')
+    }
+    if (status === 'failed' && !plan) throw reportedError || agentError()
+    return { plan, text, runId, status, error: reportedError }
+  } catch (error) {
+    await reader.cancel().catch(() => {})
+    throw error
+  } finally {
+    reader.releaseLock()
+  }
+}
+
+async function readLegacyAgentText(response, onChunk) {
+  if (!response.body) {
+    const fullText = await response.text()
+    const errorMatch = fullText.match(/^__ERROR__:(.*)$/m)
+    if (errorMatch) throw new AgentRouteError(errorMatch[1].trim() || '智能体规划失败')
+    onChunk?.(fullText)
+    return fullText
+  }
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder('utf-8')
+  let fullText = ''
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      fullText += decoder.decode(value, { stream: true })
+      onChunk?.(fullText)
+    }
+    fullText += decoder.decode()
+    const errorMatch = fullText.match(/^__ERROR__:(.*)$/m)
+    if (errorMatch) throw new AgentRouteError(errorMatch[1].trim() || '智能体规划失败')
+    onChunk?.(fullText)
+    return fullText
+  } catch (error) {
+    await reader.cancel().catch(() => {})
+    throw error
+  } finally {
+    reader.releaseLock()
+  }
+}
+
+export async function generateAIRoute(days, landmarks, aiConfig, onChunk, options = {}) {
+  const { url, apiKey, model } = aiConfig
+  const { scheme, signal, onEvent } = options
+
+  if (scheme === 'agent') {
     try {
       const response = await fetch(url, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          days,
-          landmarks: landmarks.map(lm => ({
-            id: lm.id,
-            name: lm.name,
-            originalName: lm.originalName || '',
-            bangumiName: lm.bangumiName || '',
-            bangumiOriginalName: lm.bangumiOriginalName || '',
-            ep: lm.ep != null ? String(lm.ep) : '',
-            s: lm.s ?? null,
-            geo: lm.geo || null,
-            image: lm.image || null
-          }))
-        })
+        headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream, text/plain' },
+        signal,
+        body: JSON.stringify({ days, landmarks })
       })
-
-      if (!response.ok) {
-        const errBody = await response.text()
-        throw new Error(`智能体服务返回错误 (${response.status}): ${errBody}`)
+      if (!response.ok) throw await responseError(response, '智能体服务')
+      if (response.headers.get('content-type')?.toLowerCase().includes('text/event-stream')) {
+        return await readAgentEvents(response, onEvent, signal)
       }
-
-      if (response.body && onChunk) {
-        const reader = response.body.getReader()
-        const decoder = new TextDecoder('utf-8')
-        let fullText = ''
-        while (true) {
-          const { done, value } = await reader.read()
-          if (done) break
-          const text = decoder.decode(value, { stream: true })
-          fullText += text
-          onChunk(fullText)
-        }
-        // H1: 检测流内的 __ERROR__ 哨兵（后端中途异常时写入）
-        const errorMatch = fullText.match(/__ERROR__:(.*)/)
-        if (errorMatch) {
-          throw new Error(errorMatch[1].trim() || 'AI 规划服务异常，请重试')
-        }
-        return fullText
-      } else {
-        return await response.text()
-      }
+      return await readLegacyAgentText(response, onChunk)
     } catch (error) {
-      if (error.message.includes('智能体服务返回错误')) throw error
-      throw new Error('智能体规划服务连接失败，请确认本地 Python 后端服务是否已启动（uvicorn）')
+      if (error?.name === 'AbortError' || error instanceof AgentRouteError) throw error
+      throw new AgentRouteError('智能体规划服务连接失败，请确认本地 Python 后端服务是否已启动（uvicorn）', 'NETWORK_ERROR', error)
     }
   }
 
@@ -137,6 +240,7 @@ export async function generateAIRoute(days, landmarks, aiConfig, onChunk) {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${apiKey}`
       },
+      signal,
       body: JSON.stringify({
         model,
         stream: false,
@@ -157,6 +261,7 @@ export async function generateAIRoute(days, landmarks, aiConfig, onChunk) {
     const data = await response.json()
     return data.choices[0].message.content
   } catch (error) {
+    if (error?.name === 'AbortError') throw error
     if (error.message.includes('AI 服务返回错误')) throw error
     throw new Error('AI 路线规划请求失败，请检查网络连接后重试')
   }

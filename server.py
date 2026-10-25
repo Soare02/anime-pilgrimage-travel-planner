@@ -1,11 +1,20 @@
 import os
 import traceback
-from fastapi import FastAPI, HTTPException
+import asyncio
+import json
+import queue
+import threading
+import uuid
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, field_validator
+from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel
 from typing import List, Optional
 from agent import agent
+from agent_v2 import run_plan
+from plan_schema import PlanRequest
 from rag_service import rag_service
 import agent_trace
 
@@ -19,26 +28,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-class Landmark(BaseModel):
-    id: str
-    name: str
-    originalName: Optional[str] = None
-    bangumiName: Optional[str] = None
-    bangumiOriginalName: Optional[str] = None
-    ep: Optional[str] = None
-    s: Optional[float] = None
-    geo: Optional[List[float]] = None
-    image: Optional[str] = None
-
-    @field_validator('ep', mode='before')
-    @classmethod
-    def coerce_ep(cls, v):
-        return str(v) if v is not None else None
-
-class PlanRequest(BaseModel):
-    days: int
-    landmarks: List[Landmark]
 
 class ApproveRequest(BaseModel):
     id: str
@@ -57,6 +46,114 @@ def format_timestamp(seconds: float) -> str:
     if h > 0:
         return f"{h}:{m:02d}:{s:02d}"
     return f"{m}:{s:02d}"
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_response(request: Request, exc: RequestValidationError):
+    if request.url.path not in {"/api/v2/agent/plan", "/api/agent/plan"}:
+        return await request_validation_exception_handler(request, exc)
+    fields = [{
+        "field": ".".join(str(part) for part in error.get("loc", ()) if part != "body"),
+        "message": error.get("msg", "输入无效"),
+    } for error in exc.errors()]
+    return JSONResponse(status_code=422, content={
+        "code": "INVALID_INPUT", "message": "请选择有效的天数和地标坐标后重试", "fields": fields,
+    })
+
+
+@app.post("/api/v2/agent/plan")
+async def plan_route_v2_endpoint(req: PlanRequest, request: Request):
+    """POST SSE: one run produces a complete Plan, a draft, or a coded failure."""
+    run_id = agent_trace.start_run(
+        days=req.days,
+        landmark_names=[lm.name for lm in req.landmarks],
+    )
+    events: queue.Queue[tuple[str, dict]] = queue.Queue()
+    cancelled = threading.Event()
+
+    def on_progress(stage: str, message: str) -> None:
+        if not cancelled.is_set():
+            events.put(("progress", {"stage": stage, "message": message}))
+
+    def worker() -> None:
+        agent_trace.attach_run(run_id)
+        try:
+            plan, errors, text = run_plan(
+                req, run_id, on_progress=on_progress, should_cancel=cancelled.is_set,
+            )
+            if cancelled.is_set() or any(error.code == "RUN_CANCELLED" for error in errors):
+                if not cancelled.is_set():
+                    events.put(("error", {"code": "RUN_CANCELLED", "message": "规划请求已取消", "has_draft": bool(plan)}))
+                status = "cancelled"
+            elif plan and plan.status == "complete" and plan.validation.passed:
+                events.put(("plan_ready", {"plan": plan.model_dump(mode="json"), "text": text}))
+                status = "success"
+            elif plan:
+                plan.status = "draft"
+                plan.validation.passed = False
+                events.put(("plan_draft", {
+                    "plan": plan.model_dump(mode="json"), "text": text,
+                    "errors": [error.model_dump(mode="json") for error in errors],
+                }))
+                status = "failed"
+            else:
+                primary = errors[0] if errors else None
+                events.put(("error", {
+                    "code": primary.code if primary else "MODEL_OUTPUT_INVALID",
+                    "message": primary.message if primary else "未能生成可用计划",
+                    "errors": [error.model_dump(mode="json") for error in errors],
+                    "has_draft": False,
+                }))
+                status = "failed"
+            agent_trace.end_run_by_id(run_id, status=status, error="；".join(error.message for error in errors) if errors else None)
+            events.put(("run_finished", {"status": status}))
+        except Exception as exc:
+            agent_trace.record_event("run", "未处理的规划异常", {"error": str(exc)}, level="error")
+            agent_trace.end_run_by_id(run_id, status="failed", error=str(exc))
+            if not cancelled.is_set():
+                events.put(("error", {"code": "MODEL_OUTPUT_INVALID", "message": f"规划服务异常：{exc}", "has_draft": False}))
+                events.put(("run_finished", {"status": "failed"}))
+
+    def encode_event(kind: str, payload: dict) -> bytes:
+        envelope = {
+            "event_id": uuid.uuid4().hex,
+            "run_id": run_id,
+            "type": kind,
+            "payload": payload,
+        }
+        return ("data: " + json.dumps(envelope, ensure_ascii=False) + "\n\n").encode("utf-8")
+
+    async def event_generator():
+        thread = threading.Thread(target=worker, daemon=True, name=f"agent-{run_id}")
+        started = False
+        try:
+            yield encode_event("run_started", {"message": "规划任务已开始"})
+            thread.start()
+            started = True
+            while True:
+                if await request.is_disconnected():
+                    cancelled.set()
+                    break
+                try:
+                    kind, payload = events.get_nowait()
+                except queue.Empty:
+                    await asyncio.sleep(0.08)
+                    continue
+                yield encode_event(kind, payload)
+                if kind == "run_finished":
+                    break
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        finally:
+            cancelled.set()
+            if not started:
+                agent_trace.end_run_by_id(run_id, status="cancelled", error="request closed")
+
+    return StreamingResponse(
+        event_generator(), media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Agent-Run-Id": run_id, "X-Accel-Buffering": "no"},
+    )
 
 @app.post("/api/agent/plan")
 def plan_route_endpoint(req: PlanRequest):

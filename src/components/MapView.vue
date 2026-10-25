@@ -1,49 +1,31 @@
 <template>
-  <div class="map-container" :class="{ 'is-empty': !mapPoints.length }">
+  <div class="map-container">
     <div
       ref="mapRef"
       class="map-element"
       aria-label="可交互的圣地巡礼地图"
     ></div>
+
     <div class="map-location">
-      <AppIcon name="pin" :size="14" /><span>{{ locationLabel }}</span
-      ><span class="location-separator"></span
-      ><small>{{
-        mapPoints.length ? `${mapPoints.length} 个坐标` : 'JAPAN'
-      }}</small>
+      <AppIcon name="pin" :size="15" />
+      <span>{{ locationLabel }}</span>
+      <template v-if="mapPoints.length">
+        <span class="location-separator"></span>
+        <span class="location-count">{{ mapPoints.filter(hasGeo).length }} 个地标</span>
+      </template>
     </div>
 
-    <template v-if="!mapPoints.length && !store.loading">
-      <div class="map-welcome">
-        <span>WANDER INTO A STORY</span>
-        <h3>下一站，<br />心动的那一帧。</h3>
-        <p>在真实的世界，与喜欢的故事重逢。</p>
-      </div>
-      <button
-        class="map-postcard"
-        :disabled="store.loading"
-        @click="startJourney"
-      >
-        <JourneyArtwork /><span class="postcard-caption"
-          ><span
-            ><small>A LITTLE INSPIRATION</small
-            ><strong>给下一次出发，一个理由</strong></span
-          ><span class="postcard-arrow"
-            ><AppIcon name="arrow" :size="18" /></span
-        ></span>
-      </button>
-      <span class="map-coordinate" aria-hidden="true"
-        >35°40′ N &nbsp; 139°45′ E<br /><small
-          >EVERY SCENE IS A DESTINATION</small
-        ></span
-      >
-    </template>
+    <div v-if="activePlan" class="plan-map-status" :class="{ draft: !planComplete }">
+      <strong>{{ planComplete ? '逐日行程' : '规划草案' }}</strong>
+      <span>编号为当天访问顺序 · 连线为直线</span>
+    </div>
 
     <div class="map-controls" aria-label="地图控制">
       <div class="zoom-controls">
         <button title="放大地图" aria-label="放大地图" @click="map?.zoomIn()">
-          <AppIcon name="plus" :size="18" /></button
-        ><button title="缩小地图" aria-label="缩小地图" @click="map?.zoomOut()">
+          <AppIcon name="plus" :size="18" />
+        </button>
+        <button title="缩小地图" aria-label="缩小地图" @click="map?.zoomOut()">
           <AppIcon name="minus" :size="18" />
         </button>
       </div>
@@ -52,7 +34,7 @@
         aria-label="查看全部地标"
         @click="fitBoundsToPoints"
       >
-        <AppIcon name="target" :size="19" />
+        <AppIcon name="target" :size="18" />
       </button>
       <button
         v-if="comparePoint"
@@ -60,11 +42,13 @@
         aria-label="对比拍摄"
         @click="openComparison(comparePoint)"
       >
-        <AppIcon name="camera" :size="19" />
+        <AppIcon name="camera" :size="18" />
       </button>
     </div>
+
     <div class="tile-switcher" aria-label="地图底图">
-      <AppIcon name="layers" :size="15" /><button
+      <AppIcon name="layers" :size="15" />
+      <button
         v-for="tile in tileOptions"
         :key="tile.key"
         :class="{ active: activeTile === tile.key }"
@@ -74,35 +58,33 @@
         {{ tile.label }}
       </button>
     </div>
-    <div v-if="mapPoints.length" class="map-legend">
-      <span class="legend-dot"></span
-      ><span>{{
-        store.activePanel === 'library' ? '我的收藏坐标' : '动画取景地'
-      }}</span
-      ><span class="legend-count">{{ mapPoints.length }}</span>
-    </div>
+
     <div
       v-if="store.loading && !store.planning"
       class="map-loading"
       role="status"
     >
-      <span class="loading-ring"></span><span>正在寻找故事的坐标</span>
+      <span class="loading-ring"></span>
+      <span>正在加载地图数据…</span>
     </div>
 
     <el-dialog
       v-model="comparison.open"
       title="取景对照"
-      width="960px"
+      width="920px"
       append-to-body
       class="comparison-dialog"
       @closed="clearUserPhoto"
     >
       <p class="comparison-location">
-        <AppIcon name="pin" :size="14" />{{ comparison.name }}
+        <AppIcon name="pin" :size="15" />
+        {{ comparison.name }}
       </p>
       <div class="comparison-grid">
         <section class="comparison-panel">
-          <header><span>动画中的这一帧</span><small>ANIME SCENE</small></header>
+          <header>
+            <span>动画场景</span>
+          </header>
           <div
             class="comparison-canvas"
             @wheel.prevent="adjustScale('animeScale', $event.deltaY)"
@@ -110,36 +92,43 @@
             <img
               :src="comparison.image"
               :alt="`${comparison.name} 动画场景`"
+              referrerpolicy="no-referrer"
               :style="{ transform: `scale(${comparison.animeScale / 100})` }"
             />
           </div>
           <div class="comparison-scale">
-            <label for="anime-scale">缩放</label
-            ><input
+            <label for="anime-scale">缩放</label>
+            <input
               id="anime-scale"
               v-model.number="comparison.animeScale"
               type="range"
               min="10"
               max="300"
-            /><span>{{ comparison.animeScale }}%</span
-            ><button class="text-button" @click="comparison.animeScale = 100">
+            />
+            <span>{{ comparison.animeScale }}%</span>
+            <button class="text-button" @click="comparison.animeScale = 100">
               重置
             </button>
           </div>
         </section>
+
         <section class="comparison-panel">
-          <header><span>你的镜头</span><small>YOUR PHOTO</small></header>
+          <header>
+            <span>实景照片</span>
+          </header>
           <button
             v-if="!comparison.userImage"
             class="photo-upload"
             @click="fileInput?.click()"
           >
-            <span><AppIcon name="camera" :size="28" /></span
-            ><strong>放入你拍下的风景</strong
-            ><small>选择一张照片，试试还原相同的构图</small
-            ><span class="upload-label"
-              >选择照片 <AppIcon name="plus" :size="14"
-            /></span>
+            <span class="upload-icon">
+              <AppIcon name="camera" :size="26" />
+            </span>
+            <strong>上传实景照片</strong>
+            <span class="upload-label">
+              选择照片
+              <AppIcon name="plus" :size="14" />
+            </span>
           </button>
           <div
             v-else
@@ -150,7 +139,8 @@
               :src="comparison.userImage"
               :alt="`${comparison.name} 个人拍摄照片`"
               :style="{ transform: `scale(${comparison.userScale / 100})` }"
-            /><button
+            />
+            <button
               class="remove-photo icon-button"
               aria-label="移除对比照片"
               @click="clearUserPhoto"
@@ -159,16 +149,17 @@
             </button>
           </div>
           <div class="comparison-scale">
-            <label for="photo-scale">缩放</label
-            ><input
+            <label for="photo-scale">缩放</label>
+            <input
               id="photo-scale"
               v-model.number="comparison.userScale"
               type="range"
               min="10"
               max="300"
               :disabled="!comparison.userImage"
-            /><span>{{ comparison.userScale }}%</span
-            ><button
+            />
+            <span>{{ comparison.userScale }}%</span>
+            <button
               class="text-button"
               :disabled="!comparison.userImage"
               @click="comparison.userScale = 100"
@@ -185,9 +176,6 @@
           />
         </section>
       </div>
-      <p class="comparison-tip">
-        调整画面比例，找到故事与现实重叠的瞬间。照片仅在当前浏览器中用于对比。
-      </p>
     </el-dialog>
   </div>
 </template>
@@ -206,9 +194,8 @@ import { ElMessage } from 'element-plus'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import AppIcon from './AppIcon.vue'
-import JourneyArtwork from './JourneyArtwork.vue'
 import { useAppStore } from '../stores/app'
-import { recommendations } from '../utils/recommendations'
+import { getImageUrl } from '../utils/imageUrl'
 
 const store = useAppStore()
 const mapRef = ref(null)
@@ -220,39 +207,77 @@ let markerMap = new Map()
 let boundsKey = ''
 let wasHidden = false
 const activeTile = ref('osm')
+
+const activePlan = computed(() =>
+  store.activePanel === 'library'
+    ? store.currentPlan
+    : store.activePanel === 'history'
+      ? store.historyPlan
+      : null
+)
+const planComplete = computed(
+  () =>
+    activePlan.value?.status === 'complete' &&
+    activePlan.value.validation?.passed === true
+)
 const mapPoints = computed(() =>
-  store.activePanel === 'library' && store.coordinateLibrary.length
-    ? store.coordinateLibrary
-    : store.points
+  activePlan.value
+    ? store.generatedLandmarks
+    : store.activePanel === 'library' && store.coordinateLibrary.length
+      ? store.coordinateLibrary
+      : store.points
 )
 const locationLabel = computed(() =>
-  store.activePanel === 'library' && store.coordinateLibrary.length
+  activePlan.value ||
+  (store.activePanel === 'library' && store.coordinateLibrary.length)
     ? '我的巡礼地图'
-    : store.bangumi?.city || '日本 · 东京'
+    : store.bangumi?.cn || store.bangumi?.title || store.bangumi?.city || '巡礼地图'
 )
+const planOrder = computed(() => {
+  const order = new Map()
+  if (!activePlan.value) return order
+  for (const day of activePlan.value.days || []) {
+    const ids = day.point_ids || []
+    ids.forEach((id, index) => {
+      if (!order.has(String(id)))
+        order.set(String(id), { day: day.day, order: index + 1 })
+    })
+  }
+  return order
+})
+
+const dayColors = [
+  '#2563eb',
+  '#0ea5e9',
+  '#6366f1',
+  '#8b5cf6',
+  '#ec4899',
+  '#f59e0b',
+  '#14b8a6'
+]
+
+function colorForDay(day) {
+  const number = Number(day)
+  return dayColors[
+    (Number.isFinite(number) && number >= 1 ? number - 1 : 0) % dayColors.length
+  ]
+}
+
 const comparePoint = computed(() =>
   mapPoints.value.find(
     (point) => point.id === store.selectedPointId && point.image
   )
 )
-const dayColors = [
-  '#3c614b',
-  '#75917b',
-  '#bc955d',
-  '#ba7766',
-  '#82939d',
-  '#9687a5',
-  '#729e9c'
-]
+
 const tileOptions = [
   {
     key: 'osm',
-    label: '街道',
+    label: '标准',
     url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
     options: {
       maxZoom: 19,
       attribution:
-        '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+        '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
     }
   },
   {
@@ -262,6 +287,7 @@ const tileOptions = [
     options: { maxZoom: 18, subdomains: '1234', attribution: '&copy; 高德地图' }
   }
 ]
+
 const comparison = reactive({
   open: false,
   image: '',
@@ -280,15 +306,15 @@ function escapeHtml(value) {
     .replace(/'/g, '&#39;')
 }
 function imageUrl(value) {
-  return /^https?:\/\//i.test(value || '')
-    ? value.replace(/([?&])plan=h\d+/, '$1plan=h360')
-    : ''
+  return getImageUrl(value, 'h360')
 }
 function hasGeo(point) {
   return (
     Array.isArray(point.geo) &&
     point.geo.length === 2 &&
-    point.geo.every(Number.isFinite)
+    point.geo.every(Number.isFinite) &&
+    Math.abs(point.geo[0]) <= 90 &&
+    Math.abs(point.geo[1]) <= 180
   )
 }
 function popupContent(point) {
@@ -297,18 +323,35 @@ function popupContent(point) {
   const origin = /^https?:\/\//i.test(point.originURL || '')
     ? `<a href="${escapeHtml(point.originURL)}" target="_blank" rel="noopener noreferrer">${escapeHtml(point.origin)}</a>`
     : escapeHtml(point.origin)
-  return `<article class="landmark-popup"><span class="popup-eyebrow">SCENE LOCATION</span><h3 class="popup-title">${escapeHtml(point.name)}</h3>${image ? `<img class="popup-image" src="${escapeHtml(image)}" alt="${escapeHtml(point.name)}" />` : ''}<div class="popup-meta">${point.ep ? `<span>第 ${escapeHtml(point.ep)} 集</span>` : '<span>动画取景地</span>'}${point.s ? `<span>${Math.floor(point.s / 60)}:${String(Math.floor(point.s % 60)).padStart(2, '0')}</span>` : ''}${point.day ? `<span>第 ${escapeHtml(point.day)} 天</span>` : ''}</div>${point.origin ? `<p class="popup-origin">场景来源 · ${origin}</p>` : ''}<div class="popup-footer">${image ? `<button type="button" data-compare-id="${escapeHtml(point.id)}" class="popup-compare-btn">取景对照</button>` : ''}<button type="button" class="popup-library-btn${saved ? ' is-added' : ''}" data-point-id="${escapeHtml(point.id)}" aria-pressed="${saved}">${saved ? '✓ 已收藏' : '＋ 收藏坐标'}</button></div></article>`
+  const visit = planOrder.value.get(String(point.id))
+  const visitLabel = visit
+    ? `<span>第 ${escapeHtml(visit.day)} 天 · 第 ${escapeHtml(visit.order)} 站</span>`
+    : activePlan.value
+      ? '<span>未安排</span>'
+      : point.day
+        ? `<span>第 ${escapeHtml(point.day)} 天</span>`
+        : ''
+  return `<article class="landmark-popup"><h3 class="popup-title">${escapeHtml(point.name || point.cn || point.id)}</h3>${image ? `<img class="popup-image" referrerpolicy="no-referrer" src="${escapeHtml(image)}" alt="${escapeHtml(point.name || point.id)}" />` : ''}<div class="popup-meta">${point.ep ? `<span>第 ${escapeHtml(point.ep)} 集</span>` : '<span>取景地</span>'}${point.s ? `<span>${Math.floor(point.s / 60)}:${String(Math.floor(point.s % 60)).padStart(2, '0')}</span>` : ''}${visitLabel}</div>${point.origin ? `<p class="popup-origin">来源：${origin}</p>` : ''}<div class="popup-footer">${image ? `<button type="button" data-compare-id="${escapeHtml(point.id)}" class="popup-compare-btn">取景对照</button>` : ''}<button type="button" class="popup-library-btn${saved ? ' is-added' : ''}" data-point-id="${escapeHtml(point.id)}" aria-pressed="${saved}">${saved ? '✓ 已收藏' : '＋ 收藏'}</button></div></article>`
 }
 function createMarker(point, index) {
   const selected = point.id === store.selectedPointId
-  const checked = point.checked !== false
-  const size = selected ? 36 : checked ? 30 : 23
+  const visit = planOrder.value.get(String(point.id))
+  const checked = activePlan.value ? Boolean(visit) : point.checked !== false
+  const size = selected ? 34 : checked ? 28 : 22
+  const day = visit?.day || point.day
+  const color =
+    activePlan.value && !visit
+      ? '#94a3b8'
+      : day
+        ? colorForDay(day)
+        : '#2563eb'
+  const label = activePlan.value ? visit?.order || '未' : index + 1
   return L.divIcon({
     className: 'custom-marker-wrapper',
-    html: `<div class="custom-marker${selected ? ' marker-selected' : ''}" style="width:${size}px;height:${size}px;background:${point.day ? dayColors[(point.day - 1) % 7] : '#3c614b'};opacity:${checked ? 1 : 0.5}">${index + 1}</div>`,
+    html: `<div class="custom-marker${selected ? ' marker-selected' : ''}" style="width:${size}px;height:${size}px;background:${color};opacity:${checked ? 1 : 0.65}">${label}</div>`,
     iconSize: [size, size],
     iconAnchor: [size / 2, size / 2],
-    popupAnchor: [0, -size / 2 - 5]
+    popupAnchor: [0, -size / 2 - 4]
   })
 }
 function renderMarkers() {
@@ -322,12 +365,12 @@ function renderMarkers() {
     if (!hasGeo(point)) return
     const marker = L.marker(point.geo, {
       icon: createMarker(point, index),
-      title: point.name,
+      title: point.name || point.cn || String(point.id),
       zIndexOffset: point.id === store.selectedPointId ? 1500 : 0
     })
     marker.bindPopup(popupContent(point), {
-      maxWidth: 240,
-      minWidth: 190,
+      maxWidth: 250,
+      minWidth: 200,
       className: 'scene-popup',
       autoPanPaddingTopLeft: [16, 58],
       autoPanPaddingBottomRight: [48, 38]
@@ -343,16 +386,20 @@ function renderRoutes() {
   routeLayers.forEach((layer) => map.removeLayer(layer))
   routeLayers = []
   const routes =
-    store.activePanel === 'library' ? store.libraryItinerary : store.itinerary
+    activePlan.value || store.activePanel === 'library'
+      ? store.libraryItinerary
+      : store.activePanel === 'explore'
+        ? store.itinerary
+        : []
   routes.forEach((day, index) => {
     const coordinates = day.points.filter(hasGeo).map((point) => point.geo)
     if (coordinates.length > 1)
       routeLayers.push(
         L.polyline(coordinates, {
-          color: dayColors[index % 7],
+          color: colorForDay(day.day || index + 1),
           weight: 3,
-          opacity: 0.8,
-          dashArray: '7, 7'
+          opacity: 0.85,
+          dashArray: '6, 6'
         }).addTo(map)
       )
   })
@@ -380,7 +427,6 @@ function focusPoint() {
     (point) => point.id === store.selectedPointId
   )
   if (!point || !hasGeo(point)) return
-  // Finish any previous pan before the popup calculates its available space.
   map.stop()
   map.closePopup()
   map.setView(point.geo, 16, { animate: false })
@@ -409,15 +455,6 @@ function onMapClick(event) {
   if (compareButton) openComparison(point)
   else if (store.isInLibrary(point.id)) store.removeFromLibrary(point.id)
   else store.addToLibrary(point)
-}
-async function startJourney() {
-  if (store.loading) return
-  store.activePanel = 'explore'
-  try {
-    await store.searchBangumi(recommendations[0].id)
-  } catch {
-    /* SearchPanel displays the error. */
-  }
 }
 function openComparison(point) {
   clearUserPhoto()
@@ -472,6 +509,10 @@ watch(
   renderRoutes,
   { deep: true }
 )
+watch(activePlan, () => {
+  renderMarkers()
+  renderRoutes()
+})
 watch(() => store.mapFocusRequest, focusPoint, { flush: 'post' })
 watch(
   () => store.coordinateLibrary,
@@ -549,255 +590,171 @@ onBeforeUnmount(() => {
   height: 100%;
   position: relative;
 }
+
 .map-element {
   z-index: 0;
 }
-.map-container.is-empty::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  z-index: 400;
-  pointer-events: none;
-  background: linear-gradient(
-    90deg,
-    rgba(246, 247, 236, 0.96),
-    rgba(246, 247, 236, 0.8) 30%,
-    rgba(246, 247, 236, 0.16) 70%,
-    transparent
-  );
-}
-.map-element :deep(.leaflet-tile-pane) {
-  filter: saturate(0.65) sepia(0.1);
-}
+
 .map-element :deep(.leaflet-popup-content) {
   max-height: var(--popup-max-height, 320px);
   overflow-y: auto;
   overscroll-behavior: contain;
 }
+
 .map-location {
   position: absolute;
-  top: 20px;
-  left: 20px;
+  top: 16px;
+  left: 16px;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 11px 14px;
-  border: 1px solid #e2e6db;
-  border-radius: 9px;
-  background: #fffef9f0;
-  color: #51634b;
-  font-size: 11px;
-  box-shadow: 0 3px 12px #2b402a08;
+  padding: 9px 14px;
+  border: 1px solid var(--glass-border);
+  border-radius: 12px;
+  background: var(--glass-bg-strong);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  color: var(--text-color);
+  font-size: 13px;
+  font-weight: 500;
+  box-shadow: var(--glass-shadow-sm);
   z-index: 500;
 }
-.map-location small {
-  font-size: 9px;
-  letter-spacing: 1px;
-  color: #8c9680;
+
+.map-location > svg {
+  color: var(--primary-color);
 }
+
 .location-separator {
   height: 12px;
   width: 1px;
-  background: #dfe4d5;
-  margin: 0 3px;
+  background: var(--border-color);
 }
-.map-welcome {
+
+.location-count {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-secondary);
+}
+
+.plan-map-status {
   position: absolute;
-  left: 33px;
-  top: 95px;
-  pointer-events: none;
-  z-index: 450;
-}
-.map-welcome > span {
-  color: #768569;
-  font-size: 8px;
-  font-weight: 650;
-  letter-spacing: 2px;
-}
-.map-welcome h3 {
-  font-size: clamp(25px, 2.7vw, 40px);
-  line-height: 1.45;
-  font-weight: 550;
-  letter-spacing: 3px;
-  color: #3b533e;
-  margin-top: 12px;
-  text-shadow:
-    0 1px 10px #fffef9,
-    0 1px 30px #fffef9;
-}
-.map-welcome p {
-  margin-top: 13px;
-  font-size: 11px;
-  color: #6c7d61;
-  text-shadow: 0 1px 7px #fffef9;
-}
-.map-postcard {
-  position: absolute;
-  left: 30px;
-  bottom: 68px;
-  width: clamp(220px, 24vw, 300px);
-  border: 6px solid #fffef9;
-  border-radius: 3px;
-  background: #fffef9;
-  color: var(--text-color);
-  transform: rotate(-3deg);
-  box-shadow: 0 6px 20px #2b43291c;
-  cursor: pointer;
-  text-align: left;
-  z-index: 460;
-  transition:
-    transform 0.25s,
-    box-shadow 0.25s;
-}
-.map-postcard:hover {
-  transform: rotate(0deg) translateY(-3px);
-  box-shadow: 0 10px 28px #2b43292b;
-}
-.map-postcard > svg {
-  display: block;
-  width: 100%;
-  height: auto;
-}
-.postcard-caption {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 12px 9px 8px;
-}
-.postcard-caption small {
-  display: block;
-  font-size: 7px;
-  letter-spacing: 1.5px;
-  color: #89957c;
-}
-.postcard-caption strong {
-  display: block;
-  font-size: 11px;
-  margin-top: 6px;
-  font-weight: 500;
-}
-.postcard-arrow {
-  display: flex;
-  background: #edf1e5;
-  padding: 8px;
-  border-radius: 50%;
-  color: var(--primary-color);
-}
-.map-coordinate {
-  position: absolute;
-  right: 28px;
-  top: 30px;
-  text-align: right;
-  color: #8c9c88;
-  font-family: Georgia, serif;
-  font-size: 15px;
-  line-height: 1.9;
-  pointer-events: none;
-  z-index: 450;
-}
-.map-coordinate small {
-  font-family: var(--el-font-family);
-  font-size: 6px;
-  letter-spacing: 1.4px;
-}
-.map-controls {
-  position: absolute;
-  right: 18px;
-  top: 110px;
+  top: 62px;
+  left: 16px;
+  z-index: 500;
   display: flex;
   flex-direction: column;
-  gap: 9px;
+  gap: 2px;
+  max-width: min(340px, calc(100% - 100px));
+  padding: 8px 12px;
+  border: 1px solid var(--glass-border);
+  border-radius: 10px;
+  background: var(--glass-bg-strong);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  box-shadow: var(--glass-shadow-sm);
+  color: var(--primary-color);
+  font-size: 12px;
+}
+
+.plan-map-status.draft {
+  color: #d97706;
+}
+
+.plan-map-status span {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.map-controls {
+  position: absolute;
+  right: 16px;
+  top: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
   z-index: 500;
 }
+
 .map-controls button {
-  width: 36px;
-  height: 36px;
+  width: 38px;
+  height: 38px;
   display: flex;
   align-items: center;
   justify-content: center;
-  border: 1px solid #dde2d5;
-  border-radius: 8px;
-  background: #fffef9f5;
-  color: #5b7051;
-  box-shadow: 0 2px 7px #2b402a07;
+  border: 1px solid var(--glass-border);
+  border-radius: 10px;
+  background: var(--glass-bg-strong);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  color: var(--text-color);
+  box-shadow: var(--glass-shadow-sm);
   cursor: pointer;
+  transition: all 0.18s ease;
 }
+
 .map-controls button:hover {
-  background: #e9eee0;
+  background: #ffffff;
   color: var(--primary-color);
 }
+
 .zoom-controls {
-  border: 1px solid #dde2d5;
-  border-radius: 8px;
+  border: 1px solid var(--glass-border);
+  border-radius: 10px;
   overflow: hidden;
+  box-shadow: var(--glass-shadow-sm);
 }
+
 .zoom-controls button {
   border: 0;
   border-radius: 0;
   box-shadow: none;
 }
+
 .zoom-controls button + button {
-  border-top: 1px solid #e6e9dc;
+  border-top: 1px solid var(--border-color);
 }
+
 .tile-switcher {
   position: absolute;
-  left: 20px;
-  bottom: 20px;
+  left: 16px;
+  bottom: 16px;
   display: flex;
   align-items: center;
-  gap: 3px;
-  border: 1px solid #dce3d2;
-  background: #fffef9f0;
+  gap: 4px;
+  border: 1px solid var(--glass-border);
+  background: var(--glass-bg-strong);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
   padding: 4px;
-  border-radius: 8px;
+  border-radius: 10px;
   z-index: 500;
-  box-shadow: 0 2px 7px #2b402a07;
+  box-shadow: var(--glass-shadow-sm);
 }
+
 .tile-switcher > svg {
-  margin: 0 7px 0 5px;
-  color: #829176;
+  margin: 0 6px;
+  color: var(--text-secondary);
 }
+
 .tile-switcher button {
-  padding: 7px 11px;
-  font-size: 10px;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 500;
   border: 0;
-  border-radius: 5px;
+  border-radius: 7px;
   background: none;
-  color: #7a866f;
+  color: var(--text-secondary);
   cursor: pointer;
+  transition: all 0.15s ease;
 }
+
 .tile-switcher button.active {
-  background: #e7eddf;
-  color: #3c614b;
+  background: var(--primary-soft);
+  color: var(--primary-color);
   font-weight: 600;
 }
-.map-legend {
-  position: absolute;
-  right: 20px;
-  bottom: 30px;
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  padding: 9px 11px;
-  border-radius: 8px;
-  background: #fffef9e8;
-  font-size: 9px;
-  color: #758468;
-  z-index: 450;
-}
-.legend-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--primary-color);
-}
-.legend-count {
-  font-size: 10px;
-  color: var(--primary-color);
-  padding-left: 5px;
-  border-left: 1px solid #dfe5d6;
-}
+
 .map-loading {
   position: absolute;
   top: 50%;
@@ -806,300 +763,270 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 18px 24px;
+  padding: 14px 20px;
   white-space: nowrap;
-  background: #fffef9f5;
-  border: 1px solid #dce3d2;
-  border-radius: 12px;
-  box-shadow: 0 6px 24px #30493215;
+  background: var(--glass-bg-strong);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-border);
+  border-radius: 14px;
+  box-shadow: var(--glass-shadow);
   z-index: 600;
-  font-size: 12px;
+  font-size: 13px;
+  font-weight: 500;
   color: var(--primary-color);
 }
+
 .loading-ring {
   width: 18px;
   height: 18px;
-  border: 2px solid #d8e2cf;
+  border: 2px solid rgba(37, 99, 235, 0.2);
   border-top-color: var(--primary-color);
   border-radius: 50%;
-  animation: spin 1s linear infinite;
+  animation: spin 0.9s linear infinite;
 }
+
 @keyframes spin {
   to {
     transform: rotate(360deg);
   }
 }
-:deep(.popup-eyebrow) {
-  font-size: 8px;
-  letter-spacing: 1.5px;
-  color: #929e86;
-}
+
 :deep(.popup-title) {
   font-size: 14px;
-  line-height: 1.5;
-  margin: 5px 0 10px;
+  font-weight: 600;
+  line-height: 1.4;
+  margin: 0 0 10px;
   color: var(--text-color);
 }
+
 :deep(.popup-image) {
   display: block;
   width: 100%;
-  max-height: 155px;
+  max-height: 150px;
   object-fit: cover;
-  border-radius: 7px;
+  border-radius: 8px;
 }
+
 :deep(.popup-meta) {
   display: flex;
   align-items: center;
-  gap: 10px;
-  margin: 10px 0 6px;
-  font-size: 10px;
+  gap: 8px;
+  margin: 10px 0 4px;
+  font-size: 12px;
   color: var(--text-secondary);
 }
+
 :deep(.popup-origin) {
-  font-size: 8px;
+  font-size: 11px;
   line-height: 1.5;
-  color: #98a28c;
-  margin: 5px 0 0;
+  color: var(--text-secondary);
+  margin: 4px 0 0;
 }
+
 :deep(.popup-origin a) {
-  color: #728a65;
+  color: var(--primary-color);
+  text-decoration: none;
 }
+
 :deep(.popup-footer) {
   display: flex;
-  gap: 7px;
+  gap: 8px;
   margin-top: 12px;
 }
+
 :deep(.popup-footer button) {
   display: flex;
   align-items: center;
   justify-content: center;
   flex: 1;
   font-family: inherit;
-  font-size: 10px;
-  padding: 8px 9px;
-  border: 1px solid #d6e0cc;
-  border-radius: 6px;
-  background: #f2f5ec;
-  color: var(--primary-color);
+  font-size: 12px;
+  font-weight: 500;
+  padding: 7px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.8);
+  color: var(--text-color);
   cursor: pointer;
+  transition: all 0.15s ease;
 }
+
+:deep(.popup-footer button:hover) {
+  border-color: var(--primary-color);
+  color: var(--primary-color);
+}
+
 :deep(.popup-footer .popup-library-btn) {
-  color: #fffef9;
+  color: #ffffff;
   background: var(--primary-color);
   border-color: var(--primary-color);
 }
-:deep(.popup-footer .is-added) {
-  background: #e7eddf;
-  color: var(--primary-color);
-  border-color: #d6e0cc;
+
+:deep(.popup-footer .popup-library-btn:hover) {
+  background: var(--primary-hover);
+  color: #ffffff;
 }
+
+:deep(.popup-footer .is-added) {
+  background: var(--primary-soft);
+  color: var(--primary-color);
+  border-color: rgba(37, 99, 235, 0.2);
+}
+
 .comparison-location {
   display: flex;
   align-items: center;
   gap: 6px;
   color: var(--text-secondary);
-  font-size: 12px;
-  margin: -12px 0 22px;
+  font-size: 13px;
+  margin: -8px 0 18px;
 }
+
 .comparison-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 18px;
+  gap: 16px;
 }
+
 .comparison-panel {
   border: 1px solid var(--border-color);
-  border-radius: 12px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.65);
   overflow: hidden;
   min-width: 0;
 }
+
 .comparison-panel > header {
   display: flex;
   justify-content: space-between;
-  gap: 10px;
-  padding: 15px;
-  font-size: 12px;
+  align-items: center;
+  padding: 12px 16px;
+  font-size: 13px;
+  font-weight: 600;
   color: var(--text-color);
+  border-bottom: 1px solid var(--border-color);
 }
-.comparison-panel > header small {
-  font-size: 8px;
-  color: #96a088;
-  letter-spacing: 1.2px;
-}
+
 .comparison-canvas {
   display: flex;
   align-items: flex-start;
   justify-content: center;
-  height: min(45vh, 400px);
+  height: min(44vh, 380px);
   overflow: auto;
-  background: #edf0e7;
+  background: rgba(15, 23, 42, 0.03);
   padding: 12px;
   position: relative;
 }
+
 .comparison-canvas img {
   display: block;
   max-width: 100%;
   transform-origin: top center;
+  border-radius: 6px;
 }
+
 .comparison-scale {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 13px;
+  padding: 12px 16px;
   color: var(--text-secondary);
-  font-size: 10px;
+  font-size: 12px;
+  border-top: 1px solid var(--border-color);
 }
+
 .comparison-scale input {
   flex: 1;
   min-width: 40px;
   accent-color: var(--primary-color);
 }
+
 .comparison-scale > span {
-  min-width: 34px;
+  min-width: 38px;
   font-variant-numeric: tabular-nums;
 }
+
 .photo-upload {
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   width: 100%;
-  height: min(45vh, 400px);
+  height: min(44vh, 380px);
   border: 0;
-  border-top: 1px dashed #d5ddca;
-  border-bottom: 1px dashed #d5ddca;
-  background: #f0f3e9;
-  color: #839576;
+  background: rgba(15, 23, 42, 0.02);
+  color: var(--text-secondary);
   cursor: pointer;
+  transition: background 0.18s ease;
 }
-.photo-upload > span:first-child {
+
+.photo-upload:hover {
+  background: var(--primary-soft);
+}
+
+.upload-icon {
   border-radius: 50%;
-  padding: 20px;
-  background: #e5ebdb;
+  padding: 16px;
+  background: var(--primary-soft);
+  color: var(--primary-color);
   display: flex;
-  margin-bottom: 18px;
+  margin-bottom: 14px;
 }
+
 .photo-upload strong {
   font-size: 14px;
-  font-weight: 550;
-  color: #5d7551;
+  font-weight: 600;
+  color: var(--text-color);
 }
-.photo-upload small {
-  font-size: 10px;
-  margin-top: 10px;
-}
+
 .upload-label {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 9px 14px;
-  border: 1px solid #c7d3bb;
-  border-radius: 7px;
-  margin-top: 20px;
-  font-size: 11px;
+  gap: 6px;
+  padding: 8px 14px;
+  border: 1px solid var(--border-color);
+  background: rgba(255, 255, 255, 0.85);
+  border-radius: 8px;
+  margin-top: 14px;
+  font-size: 13px;
+  color: var(--primary-color);
+  font-weight: 500;
 }
-.photo-upload:hover {
-  background: #e9eede;
-}
+
 .remove-photo {
   position: sticky;
   top: 0;
   right: 0;
-  margin-left: -34px;
+  margin-left: -36px;
   flex-shrink: 0;
-  background: #fffef9dd;
+  background: rgba(255, 255, 255, 0.9);
   color: var(--text-color);
 }
-.comparison-tip {
-  margin-top: 18px;
-  color: #939d87;
-  font-size: 10px;
-  line-height: 1.8;
-}
-@media (max-height: 820px) and (min-width: 821px) {
-  .map-welcome h3 {
-    font-size: 28px;
-  }
-  .map-welcome {
-    top: 85px;
-    left: 26px;
-  }
-  .map-welcome p {
-    display: none;
-  }
-  .map-postcard {
-    width: 218px;
-    bottom: 64px;
-    left: 28px;
-  }
-  .postcard-caption {
-    padding: 8px 6px 4px;
-  }
-}
-@media (max-width: 1100px) {
-  .map-coordinate {
-    display: none;
-  }
-  .map-welcome h3 {
-    font-size: 27px;
-  }
-  .map-postcard {
-    width: 215px;
-  }
-  .map-welcome {
-    left: 24px;
-  }
-}
+
 @media (max-width: 820px) {
-  .map-location {
-    top: 13px;
+  .plan-map-status {
+    top: 56px;
     left: 12px;
-    padding: 9px 11px;
-    font-size: 10px;
+    max-width: calc(100% - 72px);
+  }
+  .map-location {
+    top: 12px;
+    left: 12px;
+    padding: 8px 12px;
+    font-size: 12px;
   }
   .map-controls {
     right: 12px;
-    top: 66px;
+    top: 12px;
   }
   .map-controls button {
-    width: 33px;
-    height: 33px;
-  }
-  .map-welcome {
-    top: 72px;
-    left: 23px;
-  }
-  .map-welcome h3 {
-    font-size: 26px;
-    margin-top: 8px;
-  }
-  .map-welcome p {
-    display: none;
-  }
-  .map-postcard {
-    width: 185px;
-    bottom: 60px;
-    left: 25px;
-  }
-  .postcard-caption {
-    padding: 8px 5px 4px;
-  }
-  .postcard-caption strong {
-    font-size: 9px;
-  }
-  .postcard-caption small {
-    font-size: 6px;
-  }
-  .postcard-arrow {
-    padding: 6px;
+    width: 34px;
+    height: 34px;
   }
   .tile-switcher {
     left: 12px;
-    bottom: 22px;
-  }
-  .map-legend {
-    right: 12px;
-    bottom: 26px;
-    padding: 8px;
+    bottom: 16px;
   }
   .comparison-grid {
     grid-template-columns: 1fr;
@@ -1107,14 +1034,6 @@ onBeforeUnmount(() => {
   .comparison-canvas,
   .photo-upload {
     height: 230px;
-  }
-}
-@media (max-height: 720px) and (max-width: 820px) {
-  .map-postcard {
-    display: none;
-  }
-  .map-welcome h3 {
-    font-size: 23px;
   }
 }
 </style>

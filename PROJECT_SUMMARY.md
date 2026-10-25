@@ -2,6 +2,14 @@
 
 本系统是一款专为动漫爱好者设计的**圣地巡礼路线规划工具**。它支持跨作品的动漫取景地浏览、收藏，并提供基于 **Turf.js 空间聚类**的本地路线规划，以及基于 **LangGraph 多智能体协同（含人机协同 RAG 增强检索）**的 AI 路线规划方案。
 
+> 2026-09-26 更新：当前 Python Agent 默认使用 `/api/v2/agent/plan` 的结构化 Plan 与 SSE 事件。下文第 3.2 节的四节点文字流是保留的旧版 `/api/agent/plan` 流程，供兼容说明；当前实现以 [agent_v2.py](agent_v2.py)、[plan_schema.py](plan_schema.py) 和 [README.md](README.md) 为准。
+
+### 当前 Agent v2 流程
+
+入口校验正整数天数、非空且不重复的地标 ID，以及 `[纬度, 经度]` 的有效数值。原始 ID 和地标元数据直接进入 LangGraph 状态。流程依次检索资料、生成按天分组的候选计划、程序按坐标排序并计算**点位间直线距离**、进行完整性校验与内容审核、补充逐点说明。模型格式错误、遗漏或重复点位最多修复 3 次；仍未通过时保留草案与具体错误，不能返回完整结果。
+
+新版 SSE 事件依次提供运行编号、进度、完整 Plan 或草案、终态。前端同一份 Plan 驱动地图、逐日列表和模板文字，成功记录保存 Plan 与输入快照；旧历史和云端/本地模型继续按原有文字方式展示。来源按网页保存 URL、抓取时间与审核状态；旧向量集合无法确认 embedding 配置时仅允许按 ID 读取，暂停向量查询和写入。路线不提供道路导航、实际步行时间或交通班次。
+
 ---
 
 ## 1. 项目架构与技术栈
@@ -80,11 +88,10 @@ anime-travel/
 2.  **本地方案 (Local)**：
     *   直接调用本地部署的大模型（如 Ollama / LM Studio），默认接口为 `http://localhost:11434/v1/chat/completions`。
 3.  **Python 智能体方案 (Agent)**：
-    *   **核心功能**：调用本地 FastAPI 后端的 `/api/agent/plan` 流式接口。
-    *   **实现流式状态反馈**：为了解决大模型耗时长、规划框长时间空白的痛点，[agent.py](file:///e:/yidapeixun/anime-travel/agent.py) 会在后台运行各节点时，向流中输出以 `__STATUS__:` 开头的进度标识。前端 [CoordinateLibrary.vue](file:///e:/yidapeixun/anime-travel/src/components/CoordinateLibrary.vue) 实时拦截该标识，渲染成动态的加载步骤条，确保用户感知 AI 的每一步动作。
+    *   **当前接口**：默认调用 `/api/v2/agent/plan`；SSE 分别传输进度、Plan、草案、错误与终态。用户自定义旧服务返回纯文本时继续兼容显示。
 
-### 3.2 LangGraph 多智能体规划图
-在 **Agent 方案**中，后端基于 LangGraph 构建了一个流式的多智能体协同网络，各节点职责如下：
+### 3.2 旧版 `/api/agent/plan` 规划图（兼容保留）
+以下是旧版文字流接口的节点职责，当前 Agent 默认请求上文的 v2 接口：
 
 ```mermaid
 graph TD

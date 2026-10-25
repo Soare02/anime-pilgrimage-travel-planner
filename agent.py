@@ -36,6 +36,8 @@ llm_deepseek = init_chat_model(
     temperature=0.8,
     api_key=os.getenv("DEEPSEEK_API_KEY"),
     model_provider="openai", 
+    timeout=float(os.getenv("AGENT_MODEL_TIMEOUT_SECONDS", "45")),
+    max_retries=0,
     model_kwargs={"extra_body": {"thinking": {"type": "disabled"}}}
 )
 
@@ -495,6 +497,7 @@ class AgentState(TypedDict):
     final_output: str
     errors: List[str]
     revision_count: int
+    review_status: str
 
 def info_retriever_node(state: AgentState, config=None) -> Dict[str, Any]:
     agent_trace.record_node_start("info_retriever", "解析输入、RAG/Tavily 补全与 MiMo 视觉分析")
@@ -826,16 +829,39 @@ def supervisor_editor_node(state: AgentState, config=None) -> Dict[str, Any]:
     val_res = traced_llm_invoke("supervisor_editor", f"SUPERVISOR_VALIDATION (审核 #{revision_count})", val_prompt)
     val_data = parse_json_block(val_res)
 
-    is_valid = val_data.get("is_valid", False)
-    errors = val_data.get("errors", [])
+    is_valid = val_data.get("is_valid")
+    errors = val_data.get("errors")
     walking_distances = val_data.get("walking_distances", {})
+
+    # A malformed or contradictory review is a failed review. In particular,
+    # `is_valid=false, errors=[]` must not route to END with no final body.
+    if not isinstance(is_valid, bool) or not isinstance(errors, list) or any(not isinstance(item, str) for item in errors):
+        is_valid = False
+        errors = ["审核输出无法解析或字段类型错误"]
+    elif is_valid and errors:
+        is_valid = False
+        errors = ["审核结论与错误列表矛盾"] + errors
+    elif not is_valid and not errors:
+        errors = ["审核未通过，但未提供具体原因"]
 
     if not is_valid and revision_count < 3:
         agent_trace.record_node_end("supervisor_editor", f"审核未通过，回到 routing_specialist (errors={len(errors)})")
         return {
             "errors": errors,
-            "revision_count": revision_count + 1
+            "revision_count": revision_count + 1,
+            "review_status": "retry"
         }
+
+    if not is_valid:
+        draft_days = []
+        for day in refined_itinerary.get("days", []):
+            names = [lm.get("name", "未知地标") for lm in day.get("landmarks", []) if isinstance(lm, dict)]
+            draft_days.append(f"第 {day.get('day_number', len(draft_days) + 1)} 天：" + (" → ".join(names) if names else "暂无点位"))
+        content = "# 规划未通过，以下为草案\n\n" + "\n".join(draft_days) + "\n\n问题：\n" + "\n".join(f"- {err}" for err in errors)
+        if callback:
+            callback(content)
+        agent_trace.record_node_end("supervisor_editor", f"审核未通过且达到修复上限 (errors={len(errors)})")
+        return {"final_output": content, "errors": errors, "review_status": "draft"}
 
     # Validation passed or maximum revisions reached, format final output
     fmt_prompt = EDITOR_FORMATTING_PROMPT.format(
@@ -862,11 +888,12 @@ def supervisor_editor_node(state: AgentState, config=None) -> Dict[str, Any]:
 
     return {
         "final_output": content,
-        "errors": []
+        "errors": [],
+        "review_status": "complete"
     }
 
 def should_continue(state: AgentState) -> str:
-    if state.get("errors"):
+    if state.get("review_status") == "retry":
         return "routing_specialist"
     return "end"
 

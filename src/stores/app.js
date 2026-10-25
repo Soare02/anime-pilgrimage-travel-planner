@@ -22,8 +22,17 @@ export const useAppStore = defineStore('app', () => {
   const libraryItinerary = ref([])
   const libraryDays = ref(1)
   const libraryAiResponse = ref('')
-  const generatedLandmarks = ref([])  // L2: 生成时的地标快照，展开视图用
+  const generatedLandmarks = ref([])
+  const currentRequestSnapshot = ref(null)
+  const currentRunId = ref(null)
+  const currentPlan = ref(null)
+  const historyPlan = ref(null)
+  const planningProgress = ref('')
+  const runStatus = ref('idle')
+  const historySaveError = ref('')
   const routeHistory = ref(loadRouteHistory())
+  let planningRequestId = 0
+  let planningController = null
   const compareData = ref(null)
   const showAdminPage = ref(false)
   const activePanel = ref('explore')
@@ -44,7 +53,7 @@ export const useAppStore = defineStore('app', () => {
         model: 'deepseek-r1:7b'
       },
       agent: {
-        url: '/api/agent/plan',
+        url: '/api/v2/agent/plan',
         apiKey: '',
         model: ''
       }
@@ -53,12 +62,14 @@ export const useAppStore = defineStore('app', () => {
       const saved = localStorage.getItem('ai-config')
       if (saved) {
         const parsed = JSON.parse(saved)
+        const savedAgent = { ...defaultConfig.agent, ...(parsed.agent || {}) }
+        if (savedAgent.url === '/api/agent/plan') savedAgent.url = defaultConfig.agent.url
         return {
           ...defaultConfig,
           ...parsed,
           cloud: { ...defaultConfig.cloud, ...(parsed.cloud || {}) },
           local: { ...defaultConfig.local, ...(parsed.local || {}) },
-          agent: { ...defaultConfig.agent, ...(parsed.agent || {}) }
+          agent: savedAgent
         }
       }
     } catch {}
@@ -89,40 +100,50 @@ export const useAppStore = defineStore('app', () => {
   function loadRouteHistory() {
     try {
       const saved = localStorage.getItem('route-history')
-      return saved ? JSON.parse(saved) : []
+      const parsed = saved ? JSON.parse(saved) : []
+      return Array.isArray(parsed) ? parsed : []
     } catch {
       return []
     }
   }
 
-  function persistRouteHistory() {
+  function persistRouteHistory(nextHistory) {
     try {
-      localStorage.setItem('route-history', JSON.stringify(routeHistory.value))
+      localStorage.setItem('route-history', JSON.stringify(nextHistory))
+      routeHistory.value = nextHistory
+      historySaveError.value = ''
+      return true
     } catch (e) {
       console.warn('Failed to save route history:', e)
+      historySaveError.value = '本次结果未保存到历史，请检查浏览器存储空间'
+      return false
     }
   }
 
-  function saveRouteHistory(landmarks, aiResponse, days, scheme) {
-    routeHistory.value.push({
+  function saveRouteHistory(landmarks, aiResponse, days, scheme, plan = null) {
+    const snapshot = cloneLandmarks(landmarks)
+    const record = {
       id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
       timestamp: Date.now(),
       days,
-      landmarks: landmarks.map(lm => ({ id: lm.id, bangumiId: lm.bangumiId })),
+      landmarks: snapshot.map(lm => ({ id: lm.id, bangumiId: lm.bangumiId })),
       aiResponse,
       scheme
-    })
-    persistRouteHistory()
+    }
+    if (plan) {
+      record.schema_version = 1
+      record.plan = plan
+      record.landmarkSnapshot = snapshot
+    }
+    return persistRouteHistory([...routeHistory.value, record])
   }
 
   function deleteRouteHistory(id) {
-    routeHistory.value = routeHistory.value.filter(h => h.id !== id)
-    persistRouteHistory()
+    persistRouteHistory(routeHistory.value.filter(h => h.id !== id))
   }
 
   function clearRouteHistory() {
-    routeHistory.value = []
-    persistRouteHistory()
+    persistRouteHistory([])
   }
 
   const selectedPoint = computed(() => {
@@ -279,7 +300,7 @@ export const useAppStore = defineStore('app', () => {
   }
 
   function addToLibrary(point) {
-    if (!point || !point.geo) return
+    if (!point) return
     const exists = coordinateLibrary.value.some(e => e.id === point.id)
     if (exists) return
     coordinateLibrary.value.push({
@@ -301,7 +322,6 @@ export const useAppStore = defineStore('app', () => {
 
   function removeFromLibrary(pointId) {
     coordinateLibrary.value = coordinateLibrary.value.filter(e => e.id !== pointId)
-    libraryItinerary.value = []
   }
 
   function isInLibrary(pointId) {
@@ -323,43 +343,163 @@ export const useAppStore = defineStore('app', () => {
 
   function libraryRemoveSelected() {
     coordinateLibrary.value = coordinateLibrary.value.filter(e => !e.checked)
+  }
+
+  function cloneLandmarks(landmarks) {
+    return JSON.parse(JSON.stringify(landmarks))
+  }
+
+  function itineraryFromPlan(plan, landmarks) {
+    const byId = new Map(landmarks.map(lm => [String(lm.id), lm]))
+    return (plan?.days || []).map(day => ({
+      day: day.day,
+      points: (day.point_ids || []).map(id => byId.get(String(id))).filter(Boolean),
+      distance: Number.isFinite(day.straight_line_distance_m)
+        ? day.straight_line_distance_m / 1000
+        : 0,
+      distanceType: 'straight_line'
+    }))
+  }
+
+  function fallbackPlanText(plan, landmarks) {
+    const byId = new Map(landmarks.map(lm => [String(lm.id), lm]))
+    const lines = [plan.status === 'draft' ? '规划未通过，以下为草案' : '巡礼路线']
+    for (const day of plan.days || []) {
+      const names = (day.point_ids || []).map(id => byId.get(String(id))?.name || String(id))
+      lines.push(`\n第 ${day.day} 天：${names.length ? names.join(' → ') : '没有安排选中的点位'}`)
+      lines.push(`点位间直线距离：${((day.straight_line_distance_m || 0) / 1000).toFixed(2)} 公里`)
+    }
+    if (plan.unassigned_point_ids?.length) {
+      lines.push(`\n未安排：${plan.unassigned_point_ids.map(id => byId.get(String(id))?.name || String(id)).join('、')}`)
+    }
+    for (const issue of plan.validation?.errors || []) lines.push(`问题：${issue.message || issue.code}`)
+    return lines.join('\n')
+  }
+
+  function cancelLibraryItinerary() {
+    if (!planningController) return
+    planningRequestId++
+    planningController.abort()
+    planningController = null
+    planning.value = false
+    loading.value = false
+    planningProgress.value = '已取消路线规划'
+    runStatus.value = 'cancelled'
+    libraryAiResponse.value = ''
+  }
+
+  function restoreRouteHistory(record) {
+    cancelLibraryItinerary()
+    currentPlan.value = null
+    historyPlan.value = null
     libraryItinerary.value = []
+    generatedLandmarks.value = []
+    currentRequestSnapshot.value = null
+    currentRunId.value = null
+    error.value = null
+    planningProgress.value = ''
+    libraryAiResponse.value = record?.aiResponse || ''
+    if (!record?.plan) {
+      runStatus.value = 'idle'
+      return false
+    }
+    const plan = record.plan
+    const snapshot = record.landmarkSnapshot || plan.request_snapshot?.landmarks || []
+    generatedLandmarks.value = cloneLandmarks(snapshot)
+    currentRequestSnapshot.value = {
+      days: record.days || plan.request_snapshot?.days || 1,
+      landmarks: cloneLandmarks(snapshot)
+    }
+    currentPlan.value = plan
+    historyPlan.value = plan
+    currentRunId.value = plan.run_id || null
+    libraryItinerary.value = itineraryFromPlan(plan, generatedLandmarks.value)
+    libraryAiResponse.value = record.aiResponse || fallbackPlanText(plan, generatedLandmarks.value)
+    libraryDays.value = record.days || plan.request_snapshot?.days || libraryDays.value
+    runStatus.value = plan.status === 'complete' ? 'success' : 'failed'
+    return true
   }
 
   async function generateLibraryItinerary() {
-    const selected = librarySelected.value
+    const selected = cloneLandmarks(librarySelected.value)
     if (selected.length === 0) return
+    planningController?.abort()
+    const requestId = ++planningRequestId
+    const controller = new AbortController()
+    planningController = controller
+    const requestDays = libraryDays.value
+    const scheme = aiConfig.value.scheme
+    const config = { ...activeAiConfig.value }
     loading.value = true
     planning.value = true
     error.value = null
+    historySaveError.value = ''
+    planningProgress.value = scheme === 'agent' ? '正在启动智能体规划' : ''
+    runStatus.value = 'running'
+    currentRunId.value = `request-${requestId}`
+    currentPlan.value = null
+    historyPlan.value = null
+    libraryItinerary.value = []
+    generatedLandmarks.value = selected
+    currentRequestSnapshot.value = { days: requestDays, landmarks: cloneLandmarks(selected) }
     libraryAiResponse.value = ''
     try {
-      const config = activeAiConfig.value
       const result = await generateAIRoute(
-        libraryDays.value,
+        requestDays,
         selected,
         config,
         (text) => {
-          libraryAiResponse.value = text
+          if (requestId === planningRequestId) libraryAiResponse.value = text
+        },
+        {
+          scheme,
+          signal: controller.signal,
+          onEvent(event) {
+            if (requestId !== planningRequestId) return
+            if (event.type === 'run_started') currentRunId.value = event.run_id
+            if (event.type === 'progress') {
+              planningProgress.value = event.payload.message || event.payload.status || event.payload.stage || '正在规划路线'
+            }
+          }
         }
       )
-      libraryAiResponse.value = result
-      // L2: 快照生成时的选中地标（深拷贝，不受后续 checkbox 变更影响）
-      generatedLandmarks.value = selected.map(lm => ({ ...lm }))
-      // H1: 仅有效 markdown（非纯 __STATUS__/__ERROR__）才存历史，避免脏数据入库
-      const hasMarkdown = result
-        .split('\n')
-        .filter(l => !l.startsWith('__STATUS__:') && !l.startsWith('__ERROR__:'))
-        .join('')
-        .trim()
-      if (hasMarkdown) {
-        saveRouteHistory(selected, result, libraryDays.value, aiConfig.value.scheme)
+      if (requestId !== planningRequestId) return
+      if (typeof result === 'string') {
+        libraryAiResponse.value = result
+        runStatus.value = 'success'
+        const hasMarkdown = result.split('\n')
+          .filter(line => !line.startsWith('__STATUS__:') && !line.startsWith('__ERROR__:'))
+          .join('').trim()
+        if (hasMarkdown) saveRouteHistory(selected, result, requestDays, scheme)
+      } else {
+        currentRunId.value = result.runId
+        currentPlan.value = result.plan
+        libraryItinerary.value = itineraryFromPlan(result.plan, selected)
+        libraryAiResponse.value = result.text || fallbackPlanText(result.plan, selected)
+        runStatus.value = result.status
+        if (result.status === 'success') {
+          saveRouteHistory(selected, libraryAiResponse.value, requestDays, scheme, result.plan)
+        } else {
+          error.value = result.error?.message || result.plan.validation?.errors?.[0]?.message || '规划未通过，以下为草案'
+        }
       }
     } catch (e) {
-      error.value = e.message || 'AI 路线规划失败'
+      if (requestId !== planningRequestId) return
+      libraryAiResponse.value = ''
+      if (e?.name === 'AbortError' || e?.code === 'RUN_CANCELLED') {
+        runStatus.value = 'cancelled'
+        planningProgress.value = '已取消路线规划'
+        error.value = e?.code === 'RUN_CANCELLED' ? e.message : null
+      } else {
+        runStatus.value = 'failed'
+        error.value = e.message || 'AI 路线规划失败'
+      }
     } finally {
-      loading.value = false
-      planning.value = false
+      if (requestId === planningRequestId) {
+        loading.value = false
+        planning.value = false
+        planningController = null
+      }
     }
   }
 
@@ -410,6 +550,13 @@ export const useAppStore = defineStore('app', () => {
     librarySelected,
     libraryAiResponse,
     generatedLandmarks,
+    currentRequestSnapshot,
+    currentRunId,
+    currentPlan,
+    historyPlan,
+    planningProgress,
+    runStatus,
+    historySaveError,
     routeHistory,
     compareData,
     searchBangumi,
@@ -427,6 +574,8 @@ export const useAppStore = defineStore('app', () => {
     libraryUncheckAll,
     libraryRemoveSelected,
     generateLibraryItinerary,
+    cancelLibraryItinerary,
+    restoreRouteHistory,
     aiConfig,
     activeAiConfig,
     updateAiConfig,

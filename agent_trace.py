@@ -14,12 +14,13 @@ import threading
 import datetime
 import contextvars
 import logging
+import time
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("agent_trace")
 
-# DEBUG: 默认开启诊断输出，便于定位 trace 没写入的根因。问题确认后可设 AGENT_TRACE_DEBUG=0 关闭。
-DEBUG = os.getenv("AGENT_TRACE_DEBUG", "1") == "1"
+# Explicitly opt in to verbose trace diagnostics; normal runs keep logs concise.
+DEBUG = os.getenv("AGENT_TRACE_DEBUG", "0") == "1"
 
 def _dbg(msg: str) -> None:
     if DEBUG:
@@ -149,9 +150,9 @@ def _persist_current() -> None:
     _persist_run(snapshot)
 
 
-def start_run(days: int, landmark_names: List[str]) -> str:
-    """开启一条新的 trace 记录，返回 run_id 并把它绑到当前上下文。"""
-    run_id = f"run_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
+def start_run(days: int, landmark_names: List[str], run_id: Optional[str] = None) -> str:
+    """开启一条新的 trace。调用方可预先生成 run_id，使检索前后共用同一标识。"""
+    run_id = run_id or f"run_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
     run = {
         "run_id": run_id,
         "start_time": _now(),
@@ -163,11 +164,14 @@ def start_run(days: int, landmark_names: List[str]) -> str:
         "steps": [],
     }
     with _lock:
+        if run_id in _active_runs:
+            raise ValueError(f"run_id already active: {run_id}")
         _active_runs[run_id] = run
     _current_run_id.set(run_id)
     _dbg(f"start_run -> {run_id} (thread={threading.current_thread().name}, days={days})")
     # 立刻 flush 一份 "running" 占位记录，避免 generator 中途崩溃 / 客户端断开导致 0 持久化
     _persist_current()
+    record_event("run", "运行开始", {"run_id": run_id, "days": days})
     return run_id
 
 
@@ -194,6 +198,11 @@ def end_run_by_id(run_id: Optional[str], status: str = "success", error: Optiona
     if error:
         run["error"] = error
     run["duration_ms"] = _duration_ms(run.get("start_time"), run.get("end_time"))
+    run["steps"].append({
+        "type": "run_finished", "node": "run", "timestamp": run["end_time"],
+        "status": status, "summary": f"运行结束：{status}",
+        "duration_ms": run["duration_ms"], "error": error,
+    })
     _persist_run(run)
     _dbg(f"  end_run: persisted {run_id} with {len(run['steps'])} steps to {TRACE_FILE}")
 
@@ -214,6 +223,11 @@ def _patch_persisted_run(run_id: str, status: str, error: Optional[str] = None) 
                     if error:
                         run["error"] = error
                     run["duration_ms"] = _duration_ms(run.get("start_time"), run.get("end_time"))
+                    run.setdefault("steps", []).append({
+                        "type": "run_finished", "node": "run", "timestamp": run["end_time"],
+                        "status": status, "summary": f"运行结束：{status}",
+                        "duration_ms": run["duration_ms"], "error": error,
+                    })
                     changed = True
                     break
             if changed:
@@ -344,6 +358,14 @@ def record_status(node: str, message: str) -> None:
         "node": node,
         "message": message,
     })
+
+
+def record_exception(node: str, exc: BaseException, code: str = "TOOL_ERROR", started_at: Optional[float] = None) -> None:
+    """记录异常阶段和耗时；调用方仍须决定是否降级或终止运行。"""
+    details: Dict[str, Any] = {"code": code, "error_type": type(exc).__name__, "message": str(exc)}
+    if started_at is not None:
+        details["duration_ms"] = max(0, int((time.monotonic() - started_at) * 1000))
+    record_event(node, "阶段异常", details, level="error")
 
 
 # ---------------- API：供 server.py 读取 ----------------

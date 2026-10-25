@@ -7,14 +7,12 @@
           aria-label="巡礼手帖，返回探索"
           @click="navigate('explore')"
         >
-          <span class="brand-symbol"
-            ><AppIcon name="compass" :size="29"
-          /></span>
-          <span class="brand-type"
-            ><strong>巡礼手帖<span class="brand-period">.</span></strong
-            ><span>ANIME ATLAS</span></span
-          >
+          <span class="brand-symbol">
+            <AppIcon name="compass" :size="22" />
+          </span>
+          <strong class="brand-title">巡礼手帖</strong>
         </button>
+
         <nav class="main-nav" aria-label="主导航">
           <button
             v-for="item in navigation"
@@ -23,29 +21,30 @@
             :aria-current="store.activePanel === item.key ? 'page' : undefined"
             @click="navigate(item.key)"
           >
-            <AppIcon :name="item.icon" :size="17" /><span>{{
-              item.label
-            }}</span>
+            <AppIcon :name="item.icon" :size="17" />
+            <span>{{ item.label }}</span>
             <span
               v-if="item.key === 'library' && store.coordinateLibrary.length"
               class="nav-count"
-              >{{ store.coordinateLibrary.length }}</span
             >
+              {{ store.coordinateLibrary.length }}
+            </span>
           </button>
         </nav>
+
         <div class="header-actions">
           <button
-            class="icon-button admin-link"
+            class="glass-action-btn admin-link"
             title="数据中心"
             aria-label="打开数据中心"
             @click="store.showAdminPage = true"
           >
-            <AppIcon name="grid" :size="18" />
+            <AppIcon name="grid" :size="17" />
+            <span>数据中心</span>
           </button>
-          <span class="header-divider"></span>
-          <button class="settings-button" @click="store.settingsOpen = true">
-            <AppIcon name="sparkles" :size="17" /><span>AI 旅伴</span
-            ><AppIcon name="settings" :size="15" />
+          <button class="glass-action-btn settings-button" @click="store.settingsOpen = true">
+            <AppIcon name="sparkles" :size="17" />
+            <span>AI 设置</span>
           </button>
         </div>
       </header>
@@ -56,11 +55,12 @@
           :aria-pressed="!mobileMapVisible"
           @click="mobileMapVisible = false"
         >
-          <AppIcon name="bookmark" :size="16" />{{
+          <AppIcon name="bookmark" :size="16" />
+          {{
             store.activePanel === 'explore'
               ? '作品探索'
               : store.activePanel === 'library'
-                ? '收藏规划'
+                ? '我的巡礼'
                 : '旅途档案'
           }}
         </button>
@@ -69,7 +69,8 @@
           :aria-pressed="mobileMapVisible"
           @click="mobileMapVisible = true"
         >
-          <AppIcon name="map" :size="16" />巡礼地图
+          <AppIcon name="map" :size="16" />
+          巡礼地图
         </button>
       </div>
 
@@ -87,61 +88,48 @@
               @show-map="mobileMapVisible = true"
             />
           </div>
-          <div class="sidebar-footer">
+
+          <div v-if="store.activePanel === 'explore'" class="sidebar-footer">
             <button
-              v-if="
-                store.coordinateLibrary.length &&
-                store.activePanel === 'explore'
-              "
+              v-if="store.coordinateLibrary.length"
               class="collection-link"
               @click="navigate('library')"
             >
-              <span class="collection-icon"
-                ><AppIcon name="bookmark" :size="18"
-              /></span>
-              <span
-                ><strong
-                  >{{
-                    store.coordinateLibrary.length
-                  }}
-                  处心动，已收入手帖</strong
-                ><small>去安排我的巡礼路线</small></span
-              >
-              <AppIcon name="arrow" :size="18" />
+              <span class="collection-icon">
+                <AppIcon name="bookmark" :size="18" />
+              </span>
+              <span class="collection-body">
+                <strong>已收藏 {{ store.coordinateLibrary.length }} 个取景地标</strong>
+                <span>前往我的巡礼，生成多日行程路线</span>
+              </span>
+              <AppIcon name="arrow" :size="17" />
             </button>
-            <div v-else class="field-note">
-              <AppIcon name="sun" :size="18" /><span
-                >把屏幕里的心动，变成脚下的风景。</span
-              >
+            <div v-else class="workflow-bar">
+              <div class="workflow-step">
+                <span class="step-badge">1</span>
+                <span>搜索作品</span>
+              </div>
+              <span class="workflow-sep"></span>
+              <div class="workflow-step">
+                <span class="step-badge">2</span>
+                <span>收藏坐标</span>
+              </div>
+              <span class="workflow-sep"></span>
+              <div class="workflow-step">
+                <span class="step-badge">3</span>
+                <span>AI 排线</span>
+              </div>
             </div>
           </div>
         </aside>
 
         <main class="main-content" aria-label="圣地巡礼地图">
-          <div class="workspace-heading">
-            <div>
-              <span class="eyebrow">THE WORLD BEHIND THE SCENES</span>
-              <h2>{{ mapHeading }}</h2>
-            </div>
-            <span class="map-status"><span></span>巡礼地图</span>
+          <div class="map-frame">
+            <MapView />
           </div>
-          <div class="map-frame"><MapView /></div>
           <LandmarkDock />
         </main>
       </div>
-
-      <footer class="app-footer">
-        <span>每一帧喜欢，都值得亲自抵达。</span
-        ><span
-          >场景数据
-          <a href="https://anitabi.cn" target="_blank" rel="noopener noreferrer"
-            >Anitabi</a
-          ><i>×</i>作品信息
-          <a href="https://bgm.tv" target="_blank" rel="noopener noreferrer"
-            >Bangumi</a
-          ></span
-        >
-      </footer>
     </div>
     <RagAdminPanel v-if="store.showAdminPage" />
     <AiSettingsDialog />
@@ -149,7 +137,7 @@
 </template>
 
 <script setup>
-import { computed, defineAsyncComponent, ref } from 'vue'
+import { defineAsyncComponent, ref } from 'vue'
 import SearchPanel from './components/SearchPanel.vue'
 import CoordinateLibrary from './components/CoordinateLibrary.vue'
 import MapView from './components/MapView.vue'
@@ -168,18 +156,47 @@ const navigation = [
   { key: 'library', label: '我的巡礼', icon: 'bookmark' },
   { key: 'history', label: '旅途档案', icon: 'clock' }
 ]
-const mapHeading = computed(() =>
-  store.activePanel === 'library' && store.coordinateLibrary.length
-    ? '让心动的坐标，连成一段旅程'
-    : store.bangumi
-      ? store.bangumi.cn || store.bangumi.title
-      : '故事里的风景，就在这里'
-)
+
 function navigate(panel) {
   store.activePanel = panel
   mobileMapVisible.value = false
 }
 </script>
+
+<style>
+:root {
+  color-scheme: light;
+  --bg-color: #eef2f6 !important;
+  --surface-color: rgba(255, 255, 255, 0.78) !important;
+  --surface-solid: #ffffff !important;
+  --sidebar-bg: rgba(255, 255, 255, 0.72) !important;
+  --card-bg: rgba(255, 255, 255, 0.68) !important;
+  --glass-bg: rgba(255, 255, 255, 0.72) !important;
+  --glass-bg-strong: rgba(255, 255, 255, 0.88) !important;
+  --glass-bg-subtle: rgba(255, 255, 255, 0.52) !important;
+  --glass-border: rgba(255, 255, 255, 0.85) !important;
+  --glass-blur: blur(20px) saturate(180%) !important;
+  --glass-shadow: 0 10px 32px rgba(15, 23, 42, 0.06) !important;
+  --glass-shadow-sm: 0 2px 12px rgba(15, 23, 42, 0.04) !important;
+  --primary-color: #2563eb !important;
+  --primary-hover: #1d4ed8 !important;
+  --primary-soft: rgba(37, 99, 235, 0.08) !important;
+  --accent-color: #3b82f6 !important;
+  --text-color: #0f172a !important;
+  --text-secondary: #64748b !important;
+  --text-muted: #94a3b8 !important;
+  --border-color: rgba(15, 23, 42, 0.08) !important;
+  --el-color-primary: #2563eb !important;
+}
+
+body {
+  color: var(--text-color) !important;
+  background:
+    radial-gradient(circle at 10% 15%, rgba(191, 219, 254, 0.55), transparent 40%),
+    radial-gradient(circle at 90% 85%, rgba(224, 231, 255, 0.6), transparent 42%),
+    linear-gradient(135deg, #f8fafc 0%, #eef2f6 100%) !important;
+}
+</style>
 
 <style scoped>
 .app-layout,
@@ -188,399 +205,367 @@ function navigate(panel) {
   height: 100%;
   min-height: 0;
 }
+
 .travel-shell {
   display: flex;
   flex-direction: column;
+  padding: 16px 20px 20px;
+  gap: 16px;
 }
+
 .app-header {
-  height: 88px;
+  height: 64px;
   flex-shrink: 0;
-  padding: 0 32px;
+  padding: 0 20px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 24px;
+  gap: 20px;
+  background: rgba(255, 255, 255, 0.74);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border: 1px solid rgba(255, 255, 255, 0.85);
+  border-radius: 18px;
+  box-shadow: 0 4px 20px rgba(15, 23, 42, 0.05);
 }
+
 .brand {
   display: flex;
   align-items: center;
-  gap: 11px;
+  gap: 12px;
   border: 0;
   padding: 0;
   background: transparent;
-  text-align: left;
   color: var(--text-color);
   cursor: pointer;
 }
+
 .brand-symbol {
   display: grid;
   place-items: center;
-  width: 44px;
-  height: 44px;
-  background: var(--primary-color);
-  color: #f8f5e9;
-  border-radius: 14px 14px 14px 4px;
-  transform: rotate(-5deg);
+  width: 38px;
+  height: 38px;
+  background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+  color: #ffffff;
+  border-radius: 11px;
+  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.25);
 }
-.brand-symbol svg {
-  transform: rotate(5deg);
+
+.brand-title {
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
 }
-.brand-type {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-}
-.brand-type strong {
-  font-size: 23px;
-  letter-spacing: 2px;
-  font-weight: 750;
-  line-height: 1.1;
-}
-.brand-period {
-  color: var(--accent-color);
-}
-.brand-type > span {
-  font-size: 9px;
-  letter-spacing: 3.5px;
-  color: var(--text-secondary);
-}
+
 .main-nav {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 5px;
-  background: #eeeee7;
+  gap: 4px;
+  padding: 4px;
+  background: rgba(15, 23, 42, 0.04);
   border-radius: 12px;
 }
+
 .main-nav button {
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 8px;
-  padding: 11px 19px;
+  padding: 8px 18px;
   color: var(--text-secondary);
   background: transparent;
   border: 0;
   border-radius: 9px;
   cursor: pointer;
-  font-size: 13px;
+  font-size: 14px;
+  font-weight: 500;
   white-space: nowrap;
-  transition:
-    background 0.2s,
-    color 0.2s;
+  transition: all 0.18s ease;
 }
+
 .main-nav button.active {
-  background: var(--surface-color);
+  background: rgba(255, 255, 255, 0.94);
   color: var(--primary-color);
-  box-shadow: 0 2px 6px #20382a09;
-  font-weight: 650;
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.06);
+  font-weight: 600;
 }
-.main-nav button:hover {
-  color: var(--primary-color);
+
+.main-nav button:hover:not(.active) {
+  color: var(--text-color);
 }
+
 .nav-count {
-  border-radius: 5px;
+  border-radius: 999px;
   background: var(--primary-soft);
-  padding: 1px 5px;
-  font-size: 10px;
+  color: var(--primary-color);
+  padding: 1px 7px;
+  font-size: 12px;
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
+
 .header-actions {
   display: flex;
   align-items: center;
-  gap: 13px;
+  gap: 10px;
 }
-.header-divider {
-  width: 1px;
-  height: 20px;
-  background: var(--border-color);
-}
-.settings-button {
+
+.glass-action-btn {
   display: flex;
   align-items: center;
-  gap: 9px;
-  border: 1px solid #d8dfd4;
-  background: transparent;
-  padding: 11px 15px;
-  border-radius: 9px;
-  color: var(--primary-color);
-  font-size: 12px;
+  gap: 7px;
+  border: 1px solid var(--border-color);
+  background: rgba(255, 255, 255, 0.7);
+  padding: 8px 14px;
+  border-radius: 10px;
+  color: var(--text-color);
+  font-size: 13px;
+  font-weight: 500;
   cursor: pointer;
+  transition: all 0.18s ease;
 }
-.settings-button:hover {
-  background: var(--primary-soft);
+
+.glass-action-btn:hover {
+  background: #ffffff;
+  color: var(--primary-color);
+  border-color: rgba(37, 99, 235, 0.25);
 }
+
 .workspace {
   display: grid;
-  grid-template-columns: 340px minmax(0, 1fr);
-  gap: 28px;
+  grid-template-columns: 380px minmax(0, 1fr);
+  gap: 16px;
   flex: 1;
   min-height: 0;
-  padding: 8px 32px 0;
 }
+
 .sidebar {
   display: flex;
   flex-direction: column;
   min-width: 0;
   min-height: 0;
-  border-right: 1px solid var(--border-color);
-  padding-right: 26px;
+  padding: 20px;
+  background: rgba(255, 255, 255, 0.72);
+  backdrop-filter: blur(22px) saturate(180%);
+  -webkit-backdrop-filter: blur(22px) saturate(180%);
+  border: 1px solid rgba(255, 255, 255, 0.85);
+  border-radius: 20px;
+  box-shadow:
+    0 10px 32px rgba(15, 23, 42, 0.06),
+    inset 0 1px 0 rgba(255, 255, 255, 0.8);
 }
+
 .explore-scroll {
   flex: 1;
   min-height: 0;
-  padding-right: 3px;
+  padding-right: 4px;
 }
+
 .library-pane {
   display: flex;
   flex: 1;
   min-height: 0;
 }
+
 .sidebar-footer {
   flex-shrink: 0;
-  margin-top: 16px;
-  padding-top: 17px;
-  border-top: 1px dashed #d9dbd0;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border-color);
 }
-.field-note {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  color: #818574;
-  font-size: 11px;
-  padding: 4px 0;
-}
+
 .collection-link {
   display: flex;
   align-items: center;
-  gap: 11px;
+  gap: 12px;
   width: 100%;
-  padding: 13px;
-  border: 1px solid #dce2d2;
-  border-radius: 12px;
-  background: #ecefe2;
+  padding: 12px 14px;
+  border: 1px solid rgba(37, 99, 235, 0.2);
+  border-radius: 14px;
+  background: rgba(37, 99, 235, 0.08);
   color: var(--primary-color);
   cursor: pointer;
   text-align: left;
+  transition: all 0.18s ease;
 }
-.collection-link > span:nth-child(2) {
+
+.collection-link:hover {
+  background: rgba(37, 99, 235, 0.13);
+  transform: translateY(-1px);
+}
+
+.collection-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.9);
+  flex-shrink: 0;
+}
+
+.collection-body {
   flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
-.collection-link strong,
-.collection-link small {
-  display: block;
-}
-.collection-link strong {
-  font-size: 12px;
+
+.collection-body strong {
+  font-size: 13px;
   font-weight: 600;
+  color: var(--text-color);
 }
-.collection-link small {
-  margin-top: 4px;
-  font-size: 10px;
+
+.collection-body span {
+  font-size: 12px;
   color: var(--text-secondary);
 }
-.collection-icon {
-  padding: 9px;
-  border-radius: 9px;
-  background: #fcfcf6;
+
+.workflow-bar {
   display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.6);
+  border: 1px solid var(--border-color);
 }
+
+.workflow-step {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.step-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--primary-soft);
+  color: var(--primary-color);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.workflow-sep {
+  width: 16px;
+  height: 1px;
+  background: var(--border-color);
+}
+
 .main-content {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 14px;
   min-height: 0;
   min-width: 0;
 }
-.workspace-heading {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  min-height: 54px;
-  gap: 16px;
-  padding-bottom: 2px;
-}
-.workspace-heading .eyebrow {
-  font-size: 9px;
-  letter-spacing: 2.2px;
-}
-.workspace-heading h2 {
-  font-size: 20px;
-  font-weight: 600;
-  margin-top: 7px;
-  letter-spacing: 0.5px;
-}
-.map-status {
-  display: flex;
-  gap: 7px;
-  align-items: center;
-  color: var(--text-secondary);
-  font-size: 10px;
-  white-space: nowrap;
-}
-.map-status > span {
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: #648567;
-  box-shadow: 0 0 0 4px #64856710;
-}
+
 .map-frame {
   flex: 1;
-  min-height: 180px;
-  border: 1px solid #d5dccf;
+  min-height: 200px;
+  border: 1px solid rgba(255, 255, 255, 0.85);
   border-radius: 20px;
   overflow: hidden;
   position: relative;
-  background: #e7ecdf;
+  background: #e2e8f0;
+  box-shadow: 0 10px 32px rgba(15, 23, 42, 0.06);
 }
-.app-footer {
-  height: 37px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0 33px;
-  flex-shrink: 0;
-  font-size: 9px;
-  letter-spacing: 0.6px;
-  color: #888d80;
-}
-.app-footer a {
-  color: inherit;
-  text-decoration: none;
-}
-.app-footer a:hover {
-  color: var(--primary-color);
-}
-.app-footer i {
-  font-style: normal;
-  padding: 0 8px;
-  opacity: 0.5;
-}
+
 .mobile-switch {
   display: none;
 }
+
 @media (min-width: 1600px) {
   .workspace {
-    grid-template-columns: 380px minmax(0, 1fr);
-    gap: 32px;
-  }
-  .sidebar {
-    padding-right: 30px;
-  }
-  .app-header {
-    height: 96px;
-  }
-}
-@media (max-width: 1100px) {
-  .app-header {
-    padding: 0 22px;
-    gap: 15px;
-  }
-  .workspace {
-    grid-template-columns: 300px minmax(0, 1fr);
-    padding: 5px 22px 0;
+    grid-template-columns: 410px minmax(0, 1fr);
     gap: 20px;
   }
-  .sidebar {
-    padding-right: 20px;
+}
+
+@media (max-width: 1100px) {
+  .workspace {
+    grid-template-columns: 330px minmax(0, 1fr);
   }
-  .main-nav button {
-    padding: 10px 12px;
-  }
-  .brand-type strong {
-    font-size: 20px;
-  }
-  .header-actions {
-    gap: 8px;
-  }
-  .admin-link,
-  .header-divider {
+  .admin-link span {
     display: none;
   }
-  .workspace-heading h2 {
-    font-size: 17px;
+  .admin-link {
+    padding: 8px 10px;
   }
 }
+
 @media (max-width: 820px) {
+  .travel-shell {
+    padding: 12px;
+    gap: 12px;
+  }
   .app-header {
     height: auto;
-    padding: 18px 20px 12px;
+    padding: 12px 14px;
     flex-wrap: wrap;
-    gap: 18px;
-  }
-  .brand-symbol {
-    width: 37px;
-    height: 37px;
-    border-radius: 11px 11px 11px 3px;
-  }
-  .brand-type strong {
-    font-size: 20px;
-  }
-  .brand-type > span {
-    font-size: 8px;
-    letter-spacing: 2.8px;
+    gap: 12px;
+    border-radius: 16px;
   }
   .main-nav {
     order: 3;
     width: 100%;
-    padding: 4px;
   }
   .main-nav button {
     flex: 1;
-    padding: 11px 6px;
-    gap: 6px;
-    font-size: 12px;
+    padding: 8px 6px;
+    font-size: 13px;
   }
   .header-actions {
     margin-left: auto;
   }
-  .settings-button {
-    padding: 9px 11px;
-    gap: 6px;
-  }
-  .settings-button svg:last-child {
-    display: none;
-  }
-  .admin-link {
-    display: inline-flex;
-  }
   .mobile-switch {
     display: flex;
-    justify-content: center;
-    gap: 25px;
-    margin: 0 20px 12px;
-    border-bottom: 1px solid var(--border-color);
+    gap: 8px;
+    padding: 4px;
+    background: rgba(255, 255, 255, 0.74);
+    backdrop-filter: blur(20px);
+    border: 1px solid rgba(255, 255, 255, 0.85);
+    border-radius: 12px;
   }
   .mobile-switch button {
+    flex: 1;
     display: flex;
     align-items: center;
-    gap: 7px;
-    padding: 9px 4px 12px;
+    justify-content: center;
+    gap: 6px;
+    padding: 8px 12px;
     color: var(--text-secondary);
-    background: none;
+    background: transparent;
     border: 0;
-    border-bottom: 2px solid transparent;
-    font-size: 12px;
+    border-radius: 9px;
+    font-size: 13px;
+    font-weight: 500;
     cursor: pointer;
   }
   .mobile-switch button.active {
+    background: rgba(255, 255, 255, 0.94);
     color: var(--primary-color);
-    border-bottom-color: var(--primary-color);
+    font-weight: 600;
+    box-shadow: 0 2px 6px rgba(15, 23, 42, 0.05);
   }
   .workspace {
     display: flex;
-    padding: 0 20px;
     gap: 0;
   }
   .sidebar {
     width: 100%;
-    border: 0;
-    padding: 0;
-  }
-  .sidebar-footer {
-    margin-top: 12px;
-    padding-top: 12px;
+    padding: 16px;
+    border-radius: 16px;
   }
   .main-content {
     display: none;
@@ -593,26 +578,8 @@ function navigate(panel) {
   .show-mobile-map .main-content {
     display: flex;
   }
-  .workspace-heading {
-    display: none;
-  }
-  .app-footer {
-    height: 32px;
-    padding: 0 20px;
-    justify-content: center;
-    font-size: 8px;
-  }
-  .app-footer > span:first-child {
-    display: none;
-  }
   .map-frame {
-    border-radius: 15px;
-    min-height: 160px;
-  }
-}
-@media (prefers-reduced-motion: reduce) {
-  * {
-    transition: none !important;
+    border-radius: 16px;
   }
 }
 </style>

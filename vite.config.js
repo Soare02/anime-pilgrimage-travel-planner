@@ -16,6 +16,12 @@ export default defineConfig({
   ],
   server: {
     proxy: {
+      '/anitabi-data': {
+        target: 'https://www.anitabi.cn',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/anitabi-data/, '/d'),
+        proxyTimeout: 20000,
+      },
       '/ark': {
         target: 'https://ark.cn-beijing.volces.com/api/v3',
         changeOrigin: true,

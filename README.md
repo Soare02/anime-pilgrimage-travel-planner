@@ -21,11 +21,19 @@ An interactive SPA for anime pilgrimage ("圣地巡礼") route planning — expl
   - **本地聚类** — 基于 Turf.js K-Means 空间聚类 + 最近邻排序，纯前端计算
   - **云端 AI** — 调用火山引擎 Ark API 等兼容 OpenAI 的云端大模型
   - **本地 AI** — 对接本地 LM Studio / Ollama 大模型
-  - **智能体 (Agent)** — 基于 LangGraph 的多智能体协同规划（信息检索 → 空间路由 → 动漫润色 → 审查校验），集成 MiMo v2.5 视觉模型分析动漫截图
-- 👁️ **视觉场景分析** — Agent 模式中自动调用 MiMo v2.5 视觉模型分析 Anitabi 动漫截图，提取光照、角度、构图等画面信息，生成精准的拍照还原指南
+  - **智能体 (Agent)** — 基于 LangGraph 的结构化规划（资料检索 → 分天 → 程序校验与内容审核 → 场景说明），地图、逐日列表、文字和历史共用同一份 Plan
+- 👁️ **视觉场景分析** — 配置 MiMo 后可参考 Anitabi 截图生成图像观察和拍照建议；缺失或失败时显示提示，不把截图推测当成已核实事实
 - 🔎 **多策略联网检索** — Agent 模式下 `get_anime_scene` 采用中文/日文/英文/站点定向多 query 召回 + 相关性打分 + DuckDuckGo 备用搜索，覆盖知乎、Bilibili、巴哈姆特、日文舞台探访博客等真实巡礼内容来源
 - 🧠 **RAG 增强检索** — 人机协同的向量检索系统，核心 query 优先 + 站点定向 fallback 联网抓取巡礼攻略，人工审核后入库
 - 📋 **历史记录** — 路线规划结果持久化存储，支持回看和重新加载
+
+### Agent 规划结果与精度
+
+Python Agent 默认请求 `POST /api/v2/agent/plan`，提交所选地标的原始 ID、坐标与元数据，以及正整数天数。后端用 SSE 返回运行进度、完整 Plan 或草案、错误码和终态。输入错误在调用模型前返回 `INVALID_INPUT`。旧 `/api/agent/plan` 仍供自定义旧服务兼容；云端和本地模式继续展示文字结果。
+
+Plan 固定保存输入快照、逐日点位 ID 顺序、相邻点位直线距离、说明、来源、未安排点与校验结果。程序负责距离和最终文字中的分天顺序；内容审核失败或修复预算耗尽时显示带具体问题的草案，草案不写入成功历史。新历史记录可只靠快照恢复地图、列表和文字，旧历史仍按原方式读取。
+
+**距离仅指点位间直线距离。** 不含实际道路、出发地往返、步行时间、公交或铁路班次。没有出发日期时不会把当前天气写成出行天气。旧向量库若缺少可确认的 embedding 配置，仍允许按地标 ID 读取，向量查询与写入暂停，需管理员核实后建立独立版本索引；不会自动清空旧库。
 
 ---
 
@@ -78,13 +86,37 @@ An interactive SPA for anime pilgrimage ("圣地巡礼") route planning — expl
 
 | 数据源 | 用途 | 说明 |
 |--------|------|------|
-| [Anitabi API](https://github.com/anitabi/anitabi.cn-document) | 动漫取景地经纬度、截图、集数信息 | 开源动漫巡礼数据库，感谢 [Anitabi 项目](https://anitabi.cn) 提供的公开 API |
+| [Anitabi 官网地图数据](https://www.anitabi.cn/d/g.json) | 动漫取景地经纬度、截图、集数信息 | 总索引提供坐标，`gN.json` 分片提供详情，按地标 ID 合并 |
 | [Anitabi 作品数据](https://www.anitabi.cn/d/g.json) / [Bangumi](https://bgm.tv/) | 本地作品索引与在线补充搜索 | 名称未命中时通过 Anitabi 的 Bangumi 搜索服务查询 |
 | [Tavily Search](https://tavily.com/) | 巡礼攻略联网检索 (Agent 模式) | AI 搜索引擎 |
 | [wttr.in](https://wttr.in/) | 目的地实时天气 | 免费天气 API |
 | MiMo v2.5 | 动漫截图视觉分析 (Agent 模式) | 小米多模态视觉模型 |
 
-> **关于 Anitabi**：本项目依赖的开源地标数据来自 [anitabi.cn](https://anitabi.cn)，其 API 文档和数据库维护在 [anitabi/anitabi.cn-document](https://github.com/anitabi/anitabi.cn-document)。该项目的公开 API 为本工具提供了所有取景地的经纬度、动画截图和集数对照信息。
+> **关于 Anitabi**：本项目依赖的地标数据来自 [anitabi.cn](https://anitabi.cn)，文档维护在 [anitabi/anitabi.cn-document](https://github.com/anitabi/anitabi.cn-document)。地标加载现已使用官网地图数据，替代实测缺少 `geo` 的公开 `/bangumi/{id}/lite` 与 `/points/detail` 响应。截图保留来源标注与来源链接。
+
+### 地标与坐标加载
+
+浏览器通过同源 `/anitabi-data/` 代理读取官网地图数据，避免跨域限制：
+
+1. `/anitabi-data/g.json` → `https://www.anitabi.cn/d/g.json`：解析作品、坐标和分片大小。
+2. 根据作品在索引中的位置，只加载相应的 `/anitabi-data/gN.json` 详情分片。
+3. 按地标 ID 合并坐标、名称、截图、集数和出处，供地图、收藏与历史记录共用。原来的“只显示有图地标”筛选保留。
+
+适配逻辑集中在 `src/utils/anitabiMapData.js`。索引在当前页面会话中缓存 30 分钟，分片按数据版本缓存，并发请求共用一次下载；更换作品不重复下载相同分片。请求失败可重试；HTML 回退页、坐标越界、结构变化及索引与详情不一致会明确报错，避免显示“加载成功但零坐标”。
+
+图片统一通过 `src/utils/imageUrl.js` 将官网 `/images/` 路径和旧 Anitabi 图片域名转换为官网当前使用的 `https://img-tc.anitabi.cn/`，卡片使用 `h160`，弹窗与对照图使用 `h360`。旧收藏、历史快照和本地搜索索引中的图片地址也会在显示时适配；其他网站的图片保留原始来源。
+
+官网地图数据属于内部数据源，官方不保证其地址和结构稳定。开发服务器已配置代理；生产部署也必须将 `/anitabi-data/` 转发到 `https://www.anitabi.cn/d/`，例如 Nginx：
+
+```nginx
+location /anitabi-data/ {
+    proxy_pass https://www.anitabi.cn/d/;
+    proxy_set_header Host www.anitabi.cn;
+    proxy_ssl_server_name on;
+}
+```
+
+运行 `npm run test:map` 验证数据适配、缓存、异常处理和搜索收藏流程。修改代理配置后需要重启 Vite。
 
 ### 名称搜索缓存
 
@@ -106,9 +138,9 @@ An interactive SPA for anime pilgrimage ("圣地巡礼") route planning — expl
       → 命中：直接返回候选作品，不发送在线搜索请求
       → 未命中：通过 Anitabi 在线搜索补充候选作品
   → 选中作品，取得 Bangumi ID
-  → 调用 Anitabi 地标 API，显示坐标点
+  → 加载官网地图索引及作品详情分片，显示坐标点
 
-直接输入 Bangumi ID → 跳过名称搜索 → 调用 Anitabi 地标 API
+直接输入 Bangumi ID → 跳过名称搜索 → 加载官网地图数据
 ```
 
 本地搜索支持中文、日文、英文名称和别名，忽略大小写、空格及常见标点差异，完整名称优先。例如“你的名字。”、“君の名は。”和“YOUR NAME.”都能匹配 ID `160209`。在线搜索未完成时继续输入、收起结果或选择作品，会取消已过期的搜索请求，避免旧结果覆盖当前输入。
@@ -249,10 +281,15 @@ anime-travel/
 │       ├── SearchPanel.vue       # 动漫搜索 + AI 设置
 │       ├── MapView.vue           # Leaflet 地图核心
 │       ├── CoordinateLibrary.vue # 坐标库 + 历史记录
+│       ├── PlanResult.vue        # Agent Plan 逐日结果、草案和来源
 │       ├── LandmarkDock.vue      # 底部横向地标条
 │       └── RagAdminPanel.vue     # RAG 数据中心管理
 ├── server.py                     # FastAPI 后端入口
-├── agent.py                      # LangGraph 多智能体规划
+├── agent.py                      # 旧版 Agent 兼容流程与共用模型
+├── agent_v2.py                   # 结构化 LangGraph 规划与有限修复
+├── plan_schema.py                # 请求与 Plan 数据契约
+├── plan_geometry.py              # 直线距离和确定性排序
+├── plan_validation.py            # ID、天数、路段及状态校验
 ├── tools.py                      # Agent 工具集（get_anime_scene 多策略搜索 + DDG 备用）
 ├── rag_service.py                # RAG 检索与重排服务
 ├── tavily_config.py              # Tavily 搜索配置 + 共享常量 + parse_int_env

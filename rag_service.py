@@ -6,8 +6,9 @@ import json
 import datetime
 import hashlib
 import time
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Callable, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.parse import urlparse
 from dotenv import load_dotenv
 
 # LangChain components
@@ -37,6 +38,46 @@ logging.basicConfig(level=logging.INFO)
 
 HISTORY_FILE = os.path.join(os.path.dirname(__file__), "chroma_db", "rag_history.json")
 PENDING_FILE = os.path.join(os.path.dirname(__file__), "chroma_db", "rag_pending.json")
+COLLECTION_NAME = "anime_pilgrimage"
+EMBEDDING_CONFIG_VERSION = "1"
+
+
+def _positive_float_env(name: str, default: float) -> float:
+    try:
+        value = float(os.getenv(name, default))
+        return value if math.isfinite(value) and value > 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _retrieved_at() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def _source_id(url: str) -> str:
+    return "src_" + hashlib.sha256(url.encode("utf-8")).hexdigest()[:20]
+
+
+def _is_http_url(url: str) -> bool:
+    parsed = urlparse(url or "")
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def _failure_code(exc: BaseException) -> str:
+    name = type(exc).__name__.lower()
+    if isinstance(exc, (requests.exceptions.Timeout, TimeoutError)) or "timeout" in name:
+        return "TOOL_TIMEOUT"
+    if isinstance(exc, requests.exceptions.ConnectionError) or "connection" in name:
+        return "TOOL_UNAVAILABLE"
+    return "TOOL_ERROR"
+
+
+def _trace_rag_failure(stage: str, exc: BaseException) -> None:
+    try:
+        import agent_trace
+        agent_trace.record_exception(stage, exc, code=_failure_code(exc))
+    except Exception:
+        pass
 
 
 def include_raw_content_enabled(env_name: str, default: str = "1") -> bool:
@@ -67,9 +108,15 @@ def log_rag_event(event_type: str, data: dict):
             except Exception:
                 history = []
         
+        try:
+            import agent_trace
+            run_id = agent_trace.get_current_run_id()
+        except Exception:
+            run_id = None
         event = {
             "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "event_type": event_type,
+            "run_id": run_id,
             **data
         }
         history.insert(0, event)
@@ -82,56 +129,36 @@ def log_rag_event(event_type: str, data: dict):
 
 class FallbackEmbeddings(Embeddings):
     """
-    自适应向量提取器：
-    优先尝试连接本地 LM Studio 兼容 OpenAI 的端点；
-    如果失败，则平滑切换到 Chroma 内建的本地 CPU ONNXMiniLM 嵌入函数，避免系统崩溃。
+    固定模型的向量提取器。服务异常时抛出异常，绝不把另一个模型的向量混入集合。
     """
-    def __init__(self, model: str = "text-embedding-qwen3-embedding-0.6b", base_url: str = None):
-        self.model = model
-        self.base_url = base_url or os.getenv("EMBEDDING_BASE_URL", "http://localhost:1234/v1")
-        self.client = OpenAI(base_url=self.base_url, api_key="lm-studio")
-        self._local_embedding_fn = None
+    def __init__(self, model: str = None, base_url: str = None, dimension: int = None):
+        self.model = model or os.getenv("EMBEDDING_MODEL", "text-embedding-qwen3-embedding-0.6b")
+        self.base_url = (base_url or os.getenv("EMBEDDING_BASE_URL", "http://localhost:1234/v1")).rstrip("/")
+        self.dimension = dimension or parse_int_env("EMBEDDING_DIMENSION", 1024)
+        self.client = OpenAI(
+            base_url=self.base_url,
+            api_key=os.getenv("EMBEDDING_API_KEY", "lm-studio"),
+            timeout=_positive_float_env("EMBEDDING_TIMEOUT_SECONDS", 5.0),
+            max_retries=1,
+        )
 
-    def _get_local_embedding_fn(self):
-        if self._local_embedding_fn is None:
-            try:
-                import chromadb.utils.embedding_functions as ef
-                # 默认本地 CPU 极速嵌入模型 (onnx-mini-lm)
-                self._local_embedding_fn = ef.ONNXMiniLM_L6_V2()
-                logger.info("RAG-Embeddings: 已成功加载 Chroma 本地 ONNX MiniLM 嵌入函数作为备用")
-            except Exception as e:
-                logger.warning(f"RAG-Embeddings: 无法加载 ONNX MiniLM, 尝试 fallback 到 HuggingFaceEmbeddings: {e}")
-                try:
-                    from langchain_community.embeddings import HuggingFaceEmbeddings
-                    self._local_embedding_fn = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-                except Exception as ex:
-                    logger.error(f"RAG-Embeddings: 所有本地 CPU 备用嵌入全部加载失败！ {ex}")
-                    raise ex
-        return self._local_embedding_fn
+    def _check_vectors(self, vectors: List[List[float]]) -> List[List[float]]:
+        if not vectors or any(len(vector) != self.dimension for vector in vectors):
+            raise ValueError(f"embedding dimension mismatch: expected {self.dimension}")
+        return vectors
 
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
-        try:
-            # 尝试连接 LM Studio
-            response = self.client.embeddings.create(input=texts, model=self.model, timeout=5)
-            return [item.embedding for item in response.data]
-        except Exception as e:
-            logger.warning(f"RAG-Embeddings: 无法调用 LM Studio 嵌入 API ({e})，正在切换到本地 CPU 极速嵌入...")
-            fn = self._get_local_embedding_fn()
-            if hasattr(fn, "__call__"):
-                # chromadb 的 ONNX 嵌入函数接收 List[str] 并返回 List[List[float]] 列表
-                return fn(texts)
-            return fn.embed_documents(texts)
+        if not texts:
+            return []
+        response = self.client.embeddings.create(input=texts, model=self.model)
+        vectors = [item.embedding for item in sorted(response.data, key=lambda item: item.index)]
+        if len(vectors) != len(texts):
+            raise ValueError("embedding response count mismatch")
+        return self._check_vectors(vectors)
 
     def embed_query(self, text: str) -> List[float]:
-        try:
-            response = self.client.embeddings.create(input=text, model=self.model, timeout=5)
-            return response.data[0].embedding
-        except Exception as e:
-            logger.warning(f"RAG-Embeddings: 无法调用 LM Studio 嵌入 API ({e})，正在切换到本地 CPU 极速嵌入...")
-            fn = self._get_local_embedding_fn()
-            if hasattr(fn, "__call__"):
-                return fn([text])[0]
-            return fn.embed_query(text)
+        response = self.client.embeddings.create(input=text, model=self.model)
+        return self._check_vectors([response.data[0].embedding])[0]
 
 
 class LMStudioReranker:
@@ -243,18 +270,39 @@ class RAGService:
         os.makedirs(self.db_dir, exist_ok=True)
         
         self.embeddings = FallbackEmbeddings()
+        self.embedding_config = {
+            "embedding_config_version": os.getenv("EMBEDDING_CONFIG_VERSION", EMBEDDING_CONFIG_VERSION),
+            "embedding_model": self.embeddings.model,
+            "embedding_base_url": self.embeddings.base_url,
+            "embedding_dimension": self.embeddings.dimension,
+        }
         self.db = Chroma(
-            collection_name="anime_pilgrimage",
+            collection_name=COLLECTION_NAME,
             embedding_function=self.embeddings,
-            persist_directory=self.db_dir
+            persist_directory=self.db_dir,
+            collection_metadata=self.embedding_config,
         )
+        self.vector_enabled = self._embedding_binding_verified()
         self.reranker = LMStudioReranker()
         
         # 初始化 Tavily 客户端
         tavily_key = os.getenv("TAVILY_API_KEY")
-        self.tavily_client = TavilyClient(api_key=tavily_key) if tavily_key else None
+        self.tavily_client = TavilyClient(
+            api_key=tavily_key,
+            timeout=max(1, int(_positive_float_env("TAVILY_TIMEOUT_SECONDS", 10.0))),
+        ) if tavily_key else None
         if not self.tavily_client:
             logger.warning("RAG-Service: 未配置 TAVILY_API_KEY，联网预检索功能将无法正常抓取网页。")
+
+    def _embedding_binding_verified(self) -> bool:
+        metadata = getattr(self.db._collection, "metadata", None) or {}
+        verified = all(metadata.get(key) == value for key, value in self.embedding_config.items())
+        if not verified:
+            logger.warning(
+                "RAG-Service: 向量集合 embedding 配置缺失或不匹配；暂停向量查询和写入。"
+                "旧资料仍可按地标 ID 读取；请管理员核实模型配置后建立独立版本索引。"
+            )
+        return verified
 
     def is_landmark_indexed(self, landmark_id: str) -> bool:
         """
@@ -291,7 +339,12 @@ class RAGService:
         """获取所有待审核的地标暂存记录"""
         return self._read_pending()
 
-    def add_to_pending(self, landmark_id: str, name: str, bangumi: str, raw_text: str, chunks: List[str], sources: List[str]):
+    def add_to_pending(
+        self, landmark_id: str, name: str, bangumi: str, raw_text: str,
+        chunks: List[str], sources: List[str],
+        chunk_metadata: List[Dict[str, Any]] = None,
+        source_records: List[Dict[str, Any]] = None,
+    ):
         """将新搜索到的地标切片加入待审核暂存队列"""
         import uuid
         pending = self._read_pending()
@@ -303,7 +356,9 @@ class RAGService:
             "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "raw_text_preview": raw_text[:1500] + "..." if len(raw_text) > 1500 else raw_text,
             "chunks": chunks,
-            "sources": sources
+            "sources": sources,
+            "source_records": source_records or [],
+            "chunk_metadata": chunk_metadata or [],
         }
         pending.append(entry)
         self._write_pending(pending)
@@ -335,8 +390,14 @@ class RAGService:
             self._write_pending(pending)
             return True
 
+        if not self.vector_enabled:
+            logger.error("RAG-Service: embedding 配置未核实，审批记录保留在待审核队列，未写入向量库。")
+            return False
+
         documents_to_add = []
+        stored_metadata = target.get("chunk_metadata") or []
         for i, chunk in enumerate(chunks_to_write):
+            source_meta = stored_metadata[i] if i < len(stored_metadata) and len(chunks_to_write) == len(stored_metadata) else {}
             doc = Document(
                 page_content=chunk,
                 metadata={
@@ -344,7 +405,12 @@ class RAGService:
                     "landmark_name": target["landmark_name"],
                     "bangumi": target.get("bangumi", "未知"),
                     "chunk_id": i,
-                    "source": "tavily_search"
+                    "source": "tavily_search",
+                    "source_id": source_meta.get("source_id", ""),
+                    "url": source_meta.get("url", ""),
+                    "title": source_meta.get("title", ""),
+                    "retrieved_at": source_meta.get("retrieved_at", ""),
+                    "review_status": "approved" if source_meta.get("url") else "missing",
                 }
             )
             documents_to_add.append(doc)
@@ -452,7 +518,10 @@ class RAGService:
     def _is_doc_relevant_to_landmark(self, landmark: Dict[str, Any], doc: Document, score: float = -1.0) -> bool:
         meta = doc.metadata or {}
         landmark_id = self._clean_text_value(landmark.get("id"))
-        if landmark_id and self._clean_text_value(meta.get("landmark_id")) == landmark_id:
+        stored_landmark_id = self._clean_text_value(meta.get("landmark_id"))
+        if landmark_id and stored_landmark_id and stored_landmark_id != landmark_id:
+            return False
+        if landmark_id and stored_landmark_id == landmark_id:
             return True
 
         landmark_names = self._landmark_names(landmark)
@@ -475,9 +544,42 @@ class RAGService:
         landmark_id = self._clean_text_value(meta.get("landmark_id"))
         chunk_id = self._clean_text_value(meta.get("chunk_id"))
         if landmark_id and chunk_id:
-            return f"{landmark_id}:{chunk_id}"
+            return f"{landmark_id}:{meta.get('source_id', '')}:{chunk_id}"
         digest = hashlib.sha1((doc.page_content or "").encode("utf-8")).hexdigest()
         return f"content:{digest}"
+
+    def _source_from_doc(self, doc: Document, point_id: str) -> Dict[str, Any]:
+        meta = doc.metadata or {}
+        url = str(meta.get("url") or "").strip()
+        if not _is_http_url(url):
+            url = ""
+        source_id = str(meta.get("source_id") or "").strip() if url else ""
+        if not source_id:
+            source_id = _source_id(url) if url else "missing_" + hashlib.sha256(
+                f"{point_id}:{doc.page_content}".encode("utf-8")
+            ).hexdigest()[:20]
+        return {
+            "source_id": source_id,
+            "url": url,
+            "title": str(meta.get("title") or ("来源缺失" if not url else "网页资料")),
+            "retrieved_at": str(meta.get("retrieved_at") or ""),
+            "review_status": str(meta.get("review_status") or "unreviewed") if url else "missing",
+            "point_ids": [point_id] if point_id else [],
+        }
+
+    @staticmethod
+    def _merge_source_records(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        merged = {}
+        for source in records:
+            source_id = source["source_id"]
+            if source_id not in merged:
+                merged[source_id] = dict(source)
+                merged[source_id]["point_ids"] = list(source.get("point_ids") or [])
+            else:
+                for point_id in source.get("point_ids") or []:
+                    if point_id not in merged[source_id]["point_ids"]:
+                        merged[source_id]["point_ids"].append(point_id)
+        return list(merged.values())
 
     def _get_indexed_landmark_docs(self, landmark_id: str, limit: int) -> List[Document]:
         if not landmark_id:
@@ -489,7 +591,7 @@ class RAGService:
             )
         except Exception as e:
             logger.error(f"RAG-Service: direct landmark lookup failed for [{landmark_id}]: {e}")
-            return []
+            raise
 
         docs = []
         documents = results.get("documents", []) or []
@@ -517,9 +619,10 @@ class RAGService:
                 ref_name = meta.get("landmark_name") or name
                 ref_bangumi = meta.get("bangumi") or bangumi
                 source = meta.get("source") or "RAG"
+                source_id = self._source_from_doc(doc, self._clean_text_value(landmark.get("id")))["source_id"]
                 score_text = "vector" if score < 0 else f"{score}"
                 doc_blocks.append(
-                    f"【参考地标: {ref_name} (涉及作品:《{ref_bangumi}》, 来源: {source}, 评分: {score_text})】\n"
+                    f"【参考地标: {ref_name} (涉及作品:《{ref_bangumi}》, 来源: {source}, 来源ID: {source_id}, 评分: {score_text})】\n"
                     f"{(doc.page_content or '').strip()}"
                 )
             blocks.append(f"### {name} / {bangumi}\n" + "\n\n".join(doc_blocks))
@@ -539,6 +642,7 @@ class RAGService:
         missing_landmarks = []
         candidate_groups = []
         recall_details = []
+        failures = []
 
         for landmark in landmarks:
             name = self._clean_text_value(landmark.get("name")) or self._clean_text_value(landmark.get("originalName"))
@@ -549,21 +653,30 @@ class RAGService:
 
             try:
                 direct_docs = self._get_indexed_landmark_docs(
-                    self._clean_text_value(landmark.get("id")),
-                    per_landmark_k,
+                    self._clean_text_value(landmark.get("id")), per_landmark_k,
                 )
-                vector_docs = self.db.similarity_search(query, k=per_landmark_k)
-                raw_docs = []
-                raw_seen_keys = set()
-                for doc in direct_docs + vector_docs:
-                    dedup_key = self._doc_dedup_key(doc)
-                    if dedup_key in raw_seen_keys:
-                        continue
-                    raw_docs.append(doc)
-                    raw_seen_keys.add(dedup_key)
             except Exception as e:
-                logger.error(f"RAG-Service: landmark recall failed for [{name}]: {e}")
-                raw_docs = []
+                direct_docs = []
+                failures.append({"landmark_id": landmark.get("id"), "stage": "id_recall", "code": _failure_code(e), "message": str(e)})
+                _trace_rag_failure("rag_id_recall", e)
+            vector_docs = []
+            if self.vector_enabled:
+                try:
+                    vector_docs = self.db.similarity_search(query, k=per_landmark_k)
+                except Exception as e:
+                    logger.warning("RAG-Service: vector recall failed for [%s]; ID hits preserved: %s", name, e)
+                    failures.append({"landmark_id": landmark.get("id"), "stage": "vector_recall", "code": _failure_code(e), "message": str(e)})
+                    _trace_rag_failure("rag_vector_recall", e)
+            else:
+                failures.append({"landmark_id": landmark.get("id"), "stage": "vector_recall", "code": "EMBEDDING_CONFIG_UNVERIFIED", "message": "向量配置未核实，已跳过向量查询"})
+            raw_docs = []
+            raw_seen_keys = set()
+            for doc in direct_docs + vector_docs:
+                dedup_key = self._doc_dedup_key(doc)
+                if dedup_key in raw_seen_keys:
+                    continue
+                raw_docs.append(doc)
+                raw_seen_keys.add(dedup_key)
 
             if not raw_docs:
                 missing_landmarks.append(landmark)
@@ -576,7 +689,13 @@ class RAGService:
                 })
                 continue
 
-            scored_docs = self.reranker.rerank_with_scores(query, raw_docs)
+            try:
+                scored_docs = self.reranker.rerank_with_scores(query, raw_docs)
+            except Exception as e:
+                logger.warning("RAG-Service: rerank failed for [%s]; original recall order preserved: %s", name, e)
+                failures.append({"landmark_id": landmark.get("id"), "stage": "rerank", "code": _failure_code(e), "message": str(e)})
+                _trace_rag_failure("rag_rerank", e)
+                scored_docs = [(index, -1.0, doc) for index, doc in enumerate(raw_docs)]
             candidates = []
             local_seen_keys = set()
             relevant_count = 0
@@ -669,6 +788,26 @@ class RAGService:
                 detail["selected_count"] = len(group["docs"])
 
         context = self._format_landmark_context(grouped_docs)
+        source_records = []
+        landmark_context = {}
+        for group in grouped_docs:
+            point_id = self._clean_text_value(group["landmark"].get("id"))
+            chunks = []
+            for selected in group["docs"]:
+                doc = selected["doc"]
+                source = self._source_from_doc(doc, point_id)
+                source_records.append(source)
+                chunks.append({
+                    "text": doc.page_content,
+                    "source_id": source["source_id"],
+                    "review_status": source["review_status"],
+                })
+            landmark_context[point_id] = {
+                "context": self._format_landmark_context([group]),
+                "chunks": chunks,
+                "source_ids": list(dict.fromkeys(item["source_id"] for item in chunks)),
+            }
+        sources = self._merge_source_records(source_records)
         log_rag_event("multi_recall", {
             "landmarks_count": len(landmarks),
             "hit_count": len(hit_landmarks),
@@ -676,6 +815,7 @@ class RAGService:
             "selected_chunks_count": total_selected,
             "details": recall_details,
             "final_context": context,
+            "failures": failures,
         })
         logger.info(
             "RAG-Service: multi-route recall complete. hits=%s missing=%s selected_chunks=%s",
@@ -687,6 +827,10 @@ class RAGService:
             "context": context,
             "hit_landmarks": hit_landmarks,
             "missing_landmarks": missing_landmarks,
+            "sources": sources,
+            "landmark_context": landmark_context,
+            "failures": failures,
+            "status": "failed" if failures and not hit_landmarks else ("partial" if failures or missing_landmarks else "success"),
         }
 
     def _search_single_landmark(
@@ -695,13 +839,17 @@ class RAGService:
         bangumi: str,
         original_name: str = "",
         bangumi_original_name: str = "",
-    ) -> str:
+        should_cancel: Optional[Callable[[], bool]] = None,
+    ) -> Dict[str, Any]:
         """
         联网搜索单个地标的长效攻略、圣地巡礼剧情以及交通状况，自动规避天气等易变词汇。
         包含智能防噪与内容过滤机制，拒绝 Git Diff 页面、不相关技术博客及 SEO 垃圾网页。
         """
+        is_cancelled = lambda: bool(should_cancel and should_cancel())
+        if is_cancelled():
+            return {"text": "", "pages": [], "failures": [{"code": "RUN_CANCELLED", "message": "检索已取消"}]}
         if not self.tavily_client:
-            return ""
+            return {"text": "", "pages": [], "failures": [{"code": "TOOL_UNCONFIGURED", "message": "TAVILY_API_KEY 未配置"}]}
         
         # 严格限制在“长效背景知识”领域，规避瞬时信息；核心 query 先跑，站点 query 仅在召回不足时补充。
         core_queries = []
@@ -760,33 +908,52 @@ class RAGService:
         search_depth = os.getenv("RAG_TAVILY_SEARCH_DEPTH", "basic")
         queries = core_queries[:core_limit]
 
-        def run_tavily_queries(query_batch: List[Tuple[str, str]]) -> List[Tuple[str, Dict[str, Any]]]:
-            if not query_batch:
-                return []
+        search_failures = []
 
-            responses = []
-            with ThreadPoolExecutor(max_workers=min(len(query_batch), 3)) as executor:
-                future_to_label = {
-                    executor.submit(
-                        self.tavily_client.search,
+        def search_with_retry(query: str) -> Dict[str, Any]:
+            attempts = min(parse_int_env("TAVILY_MAX_RETRIES", 1, min_value=0), 2) + 1
+            for attempt in range(attempts):
+                if is_cancelled():
+                    return {}
+                try:
+                    return self.tavily_client.search(
                         query=query,
                         **get_tavily_search_kwargs(
                             search_depth=search_depth,
                             max_results=5,
                             include_raw_content=include_raw_content_enabled("RAG_TAVILY_INCLUDE_RAW_CONTENT", "1"),
-                        )
-                    ): label
-                    for label, query in query_batch
-                }
+                        ),
+                    )
+                except Exception as exc:
+                    transient = "timeout" in type(exc).__name__.lower() or "connection" in type(exc).__name__.lower()
+                    if not transient or attempt + 1 >= attempts:
+                        raise
+                    time.sleep(0.2 * (attempt + 1))
+            return {}
+
+        def run_tavily_queries(query_batch: List[Tuple[str, str]]) -> List[Tuple[str, Dict[str, Any]]]:
+            if not query_batch or is_cancelled():
+                return []
+
+            responses = []
+            with ThreadPoolExecutor(max_workers=min(len(query_batch), 3)) as executor:
+                future_to_label = {}
+                for label, query in query_batch:
+                    if is_cancelled():
+                        break
+                    future_to_label[executor.submit(search_with_retry, query)] = label
                 for future in as_completed(future_to_label):
                     label = future_to_label[future]
                     try:
                         responses.append((label, future.result()))
                     except Exception as e:
                         logger.warning(f"RAG-Service: {label}检索失败 [{name}]: {e}")
+                        search_failures.append({"code": _failure_code(e), "message": str(e), "stage": label})
+                        _trace_rag_failure("rag_web_search", e)
             return responses
 
         contents = []
+        pages = []
         seen_urls = set()
 
         def append_useful_results(responses: List[Tuple[str, Dict[str, Any]]]) -> None:
@@ -863,7 +1030,9 @@ class RAGService:
                         )
                         continue
 
-                    contents.append(f"【{label}来源网页: {title} ({url})】\n{content}\n")
+                    clean_url = url if _is_http_url(url) else ""
+                    pages.append({"title": title, "url": clean_url, "content": content, "retrieved_at": _retrieved_at()})
+                    contents.append(f"【{label}来源网页: {title} ({clean_url or '来源缺失'})】\n{content}\n")
 
         try:
             include_domains = get_tavily_include_domains()
@@ -875,7 +1044,7 @@ class RAGService:
             )
             append_useful_results(run_tavily_queries(queries))
 
-            if len(contents) < min_results and site_queries:
+            if not is_cancelled() and len(contents) < min_results and site_queries:
                 fallback_queries = site_queries[:site_limit]
                 logger.info(
                     "RAG-Service: 地标 [%s] 核心检索仅命中 %s 条，追加站点定向检索: %s",
@@ -885,19 +1054,31 @@ class RAGService:
                 )
                 append_useful_results(run_tavily_queries(fallback_queries))
 
-            return "\n".join(contents)
+            if is_cancelled():
+                return {"text": "", "pages": [], "failures": search_failures + [{"code": "RUN_CANCELLED", "message": "检索已取消"}]}
+            return {"text": "\n".join(contents), "pages": pages, "failures": search_failures}
         except Exception as e:
             logger.error(f"RAG-Service: 地标 [{name}] 检索失败，细节: {e}")
-            return ""
+            return {"text": "", "pages": [], "failures": search_failures + [{"code": "TOOL_ERROR", "message": str(e)}]}
 
-    def ingest_landmarks(self, landmarks: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def ingest_landmarks(
+        self, landmarks: List[Dict[str, Any]],
+        should_cancel: Optional[Callable[[], bool]] = None,
+    ) -> Dict[str, Any]:
         """
         并发检索缺失的地标信息，递归切片并暂存至待审核队列（不直接写入 ChromaDB）。
         返回暂存状态信息和本次新检索文本，供前端展示审核提示，并供当前生成链路临时使用。
         """
+        is_cancelled = lambda: bool(should_cancel and should_cancel())
+        empty_result = {"pending_count": 0, "pending_landmarks": [], "search_context": "", "sources": [], "landmark_context": {}}
+        if is_cancelled():
+            return {**empty_result, "failures": [{"code": "RUN_CANCELLED", "message": "联网补充已取消"}], "status": "cancelled"}
+
         # 1. 过滤出在数据库中没有缓存记录、且不在待审核队列中的地标
         to_search = []
         for lm in landmarks:
+            if is_cancelled():
+                return {**empty_result, "failures": [{"code": "RUN_CANCELLED", "message": "联网补充已取消"}], "status": "cancelled"}
             lm_id = lm.get("id")
             lm_name = lm.get("name")
             original_name = lm.get("originalName") or ""
@@ -916,64 +1097,136 @@ class RAGService:
                 
         if not to_search:
             logger.info("RAG-Service: 所有地标均已缓存或待审核，无需进行额外联网检索。")
-            return {"pending_count": 0, "pending_landmarks": [], "search_context": ""}
+            return {"pending_count": 0, "pending_landmarks": [], "search_context": "", "sources": [], "landmark_context": {}, "failures": [], "status": "success"}
 
         # 2. 并发对需要抓取的地标进行联网检索
         results_to_stage = []
+        failures = []
+        try:
+            import agent_trace
+            run_id = agent_trace.get_current_run_id()
+        except Exception:
+            agent_trace = None
+            run_id = None
+
+        def search_with_trace(name, bangumi, original_name, bangumi_original_name):
+            if agent_trace and run_id:
+                agent_trace.attach_run(run_id)
+            if is_cancelled():
+                return {"text": "", "pages": [], "failures": [{"code": "RUN_CANCELLED", "message": "检索已取消"}]}
+            return self._search_single_landmark(name, bangumi, original_name, bangumi_original_name, should_cancel)
+
         ingest_workers = parse_int_env("RAG_INGEST_MAX_WORKERS", 3)
         with ThreadPoolExecutor(max_workers=min(len(to_search), ingest_workers)) as executor:
-            future_to_lm = {
-                executor.submit(
-                    self._search_single_landmark,
+            future_to_lm = {}
+            for lm_id, name, bangumi, original_name, bangumi_original_name in to_search:
+                if is_cancelled():
+                    break
+                future = executor.submit(
+                    search_with_trace,
                     name,
                     bangumi,
                     original_name,
                     bangumi_original_name
-                ): (lm_id, name, bangumi)
-                for lm_id, name, bangumi, original_name, bangumi_original_name in to_search
-            }
+                )
+                future_to_lm[future] = (lm_id, name, bangumi)
             
             for future in as_completed(future_to_lm):
                 lm_id, name, bangumi = future_to_lm[future]
                 try:
-                    raw_text = future.result()
+                    search_result = future.result()
+                    if isinstance(search_result, str):
+                        raw_text = search_result
+                        pages = []
+                    else:
+                        raw_text = search_result.get("text", "")
+                        pages = search_result.get("pages", [])
+                        failures.extend({**item, "landmark_id": lm_id} for item in search_result.get("failures", []))
                     if raw_text.strip():
-                        results_to_stage.append((lm_id, name, bangumi, raw_text))
+                        results_to_stage.append((lm_id, name, bangumi, raw_text, pages))
                 except Exception as exc:
                     logger.error(f"RAG-Service: 并发检索地标 [{name}] 线程跑飞: {exc}")
+                    failures.append({"landmark_id": lm_id, "code": "TOOL_ERROR", "message": str(exc)})
 
         # 3. 递归切片并暂存至待审核队列（不直接写入 ChromaDB）
         if not results_to_stage:
             logger.warning("RAG-Service: 未获取到有效的联网检索内容，本次不进行暂存。")
-            return {"pending_count": 0, "pending_landmarks": [], "search_context": ""}
+            if is_cancelled():
+                failures.append({"code": "RUN_CANCELLED", "message": "联网补充已取消"})
+                return {**empty_result, "failures": failures, "status": "cancelled"}
+            return {"pending_count": 0, "pending_landmarks": [], "search_context": "", "sources": [], "landmark_context": {}, "failures": failures, "status": "failed" if failures else "partial"}
             
         splitter = RecursiveCharacterTextSplitter(chunk_size=600, chunk_overlap=60)
         pending_landmarks = []
+        all_source_records = []
+        landmark_context = {}
+        staged_context_blocks = []
         
-        for lm_id, name, bangumi, text in results_to_stage:
-            chunks = splitter.split_text(text)
+        for lm_id, name, bangumi, text, pages in results_to_stage:
+            if is_cancelled():
+                failures.append({"code": "RUN_CANCELLED", "message": "联网补充已取消"})
+                break
+            if not pages:
+                # 兼容旧的纯文本搜索返回值；出处无法可靠恢复时明确标注缺失。
+                pages = [{"title": "来源缺失", "url": "", "content": text, "retrieved_at": ""}]
+            chunks = []
+            chunk_metadata = []
+            source_records = []
+            for page in pages:
+                content = str(page.get("content") or "").strip()
+                if not content:
+                    continue
+                url = str(page.get("url") or "").strip()
+                if not _is_http_url(url):
+                    url = ""
+                title = str(page.get("title") or ("网页资料" if url else "来源缺失"))
+                source_id = _source_id(url) if url else "missing_" + hashlib.sha256(
+                    f"{lm_id}:{title}:{content}".encode("utf-8")
+                ).hexdigest()[:20]
+                status = "unreviewed" if url else "missing"
+                source = {
+                    "source_id": source_id, "url": url, "title": title,
+                    "retrieved_at": str(page.get("retrieved_at") or ""),
+                    "review_status": status, "point_ids": [lm_id],
+                }
+                source_records.append(source)
+                for chunk in splitter.split_text(content):
+                    chunks.append(chunk)
+                    chunk_metadata.append({key: source[key] for key in ("source_id", "url", "title", "retrieved_at", "review_status")})
             logger.info(f"RAG-Service: 地标 [{name}] 联网文本提取完毕，递归切割为 {len(chunks)} 个文本块，已加入待审核队列。")
-            
-            # 提取来源 URL
-            sources = []
-            for line in text.split("\n"):
-                if line.startswith("【") and "来源网页:" in line and "(" in line and ")" in line:
-                    url_start = line.rfind("(")
-                    url_end = line.rfind(")")
-                    if url_start < url_end:
-                        sources.append(line[url_start+1:url_end])
-            
-            self.add_to_pending(lm_id, name, bangumi or "未知", text, chunks, sources)
+            if not chunks:
+                continue
+            if is_cancelled():
+                failures.append({"code": "RUN_CANCELLED", "message": "联网补充已取消"})
+                break
+            self.add_to_pending(
+                lm_id, name, bangumi or "未知", text, chunks,
+                [source["url"] for source in source_records if source["url"]],
+                chunk_metadata=chunk_metadata,
+                source_records=source_records,
+            )
             pending_landmarks.append({"id": lm_id, "name": name, "chunks_count": len(chunks)})
+            staged_context_blocks.append(f"### {name} / {bangumi or '未知'}\n{text}")
+            all_source_records.extend(source_records)
+            landmark_context[lm_id] = {
+                "context": f"### {name} / {bangumi or '未知'}\n{text}",
+                "chunks": [
+                    {"text": chunk, "source_id": meta["source_id"], "review_status": meta["review_status"]}
+                    for chunk, meta in zip(chunks, chunk_metadata)
+                ],
+                "source_ids": list(dict.fromkeys(meta["source_id"] for meta in chunk_metadata)),
+            }
             
-        search_context = "\n\n".join(
-            f"### {name} / {bangumi or '未知'}\n{text}"
-            for _, name, bangumi, text in results_to_stage
-        )
+        search_context = "\n\n".join(staged_context_blocks)
         return {
             "pending_count": len(pending_landmarks),
             "pending_landmarks": pending_landmarks,
             "search_context": search_context,
+            "sources": self._merge_source_records(all_source_records),
+            "landmark_context": landmark_context,
+            "failures": failures,
+            "status": "cancelled" if any(item.get("code") == "RUN_CANCELLED" for item in failures)
+            else ("partial" if failures or len(pending_landmarks) < len(to_search) else "success"),
         }
 
     def query_rag_context(self, query: str, k: int = 6) -> str:
@@ -981,6 +1234,9 @@ class RAGService:
         向量检索 (Recall K=6) -> 重排评分 (Rerank) -> 过滤保留 Top 3。
         输出格式化好的 Context 字符串供大模型规划路线。
         """
+        if not self.vector_enabled:
+            logger.warning("RAG-Service: embedding 配置未核实，跳过全局向量检索；可改用按地标 ID 查询。")
+            return ""
         try:
             # 1. 向量相似度粗回 Top K
             raw_docs = self.db.similarity_search(query, k=k)
@@ -1049,10 +1305,12 @@ class RAGService:
         try:
             self.db.delete_collection()
             self.db = Chroma(
-                collection_name="anime_pilgrimage",
+                collection_name=COLLECTION_NAME,
                 embedding_function=self.embeddings,
-                persist_directory=self.db_dir
+                persist_directory=self.db_dir,
+                collection_metadata=self.embedding_config,
             )
+            self.vector_enabled = self._embedding_binding_verified()
             logger.info("RAG-Service: Chroma 向量数据库已成功清空并且重新初始化。")
             return True
         except Exception as e:

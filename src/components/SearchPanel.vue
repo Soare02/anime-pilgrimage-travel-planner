@@ -1,49 +1,51 @@
 <template>
   <section class="search-panel">
-    <div class="search-intro">
-      <span class="eyebrow"
-        ><span class="tiny-line"></span> A JOURNEY INTO ANIME</span
-      >
-      <h1>去故事里，<br />见一面<span class="title-dot">。</span></h1>
-      <p>寻找动画中的真实风景，<br />收藏下一段旅程的坐标。</p>
-      <span class="intro-stamp" aria-hidden="true">旅<small>たび</small></span>
-    </div>
+    <header class="panel-hero">
+      <h1>探索圣地坐标</h1>
+      <p>检索动画作品，在地图中还原真实取景地</p>
+    </header>
 
-    <form class="search-form" role="search" @submit.prevent="handleSearch">
-      <label for="anime-search" class="search-label">想从哪部作品出发？</label>
-      <div class="search-field">
-        <AppIcon name="search" :size="18" />
-        <input
-          id="anime-search"
-          v-model="searchText"
-          type="search"
-          placeholder="作品名称 / Bangumi ID"
-          autocomplete="off"
-          :disabled="loading"
-          @input="handleInput"
-        />
+    <div class="search-card">
+      <form class="search-form" role="search" @submit.prevent="handleSearch">
+        <div class="search-field">
+          <AppIcon name="search" :size="18" />
+          <input
+            id="anime-search"
+            v-model="searchText"
+            type="search"
+            placeholder="搜索作品名称或 Bangumi ID"
+            aria-label="搜索动画作品"
+            autocomplete="off"
+            :disabled="loading"
+            @input="handleInput"
+          />
+          <button
+            type="submit"
+            :disabled="loading || searching || !searchText.trim()"
+            aria-label="搜索作品"
+          >
+            <AppIcon v-if="!searching" name="arrow" :size="17" />
+            <span v-else class="small-spinner"></span>
+          </button>
+        </div>
+      </form>
+
+      <div class="quick-tags">
         <button
-          type="submit"
-          :disabled="loading || searching || !searchText.trim()"
-          aria-label="搜索作品"
+          v-for="tag in quickTags"
+          :key="tag.name"
+          type="button"
+          class="quick-tag"
+          :disabled="loading"
+          @click="selectAnime(tag.id, tag.name)"
         >
-          <AppIcon v-if="!searching" name="arrow" :size="18" /><span
-            v-else
-            class="small-spinner"
-          ></span>
+          {{ tag.name }}
         </button>
       </div>
-      <div class="search-hint">
-        <span>{{
-          searching ? '正在寻找作品…' : '输入名称自动搜索，也可以直接输入 ID'
-        }}</span
-        ><kbd>↵</kbd>
-      </div>
-    </form>
+    </div>
 
     <div v-if="error" class="search-error" role="alert">
       <el-alert :title="error" type="error" show-icon :closable="false" />
-      <p v-if="hasSearched">可以直接输入 Bangumi ID，或从下方推荐作品出发。</p>
     </div>
 
     <section
@@ -58,34 +60,37 @@
         <button class="text-button" @click="closeResults">收起</button>
       </div>
       <p v-if="!searchResults.length && !searching" class="no-results">
-        暂时没有找到这部作品，换个名称或试试 Bangumi ID。
+        未找到相关作品，请尝试其他名称或输入 Bangumi ID。
       </p>
-      <button
-        v-for="item in searchResults"
-        :key="item.id"
-        class="result-item"
-        :disabled="loading"
-        @click="selectAnime(item.id, item.name_cn || item.name)"
-      >
-        <span class="result-cover"
-          ><img
-            v-if="item.image"
-            :src="item.image"
-            :alt="item.name_cn || item.name"
-            loading="lazy"
-            @error="hideBrokenImage" /><AppIcon v-else name="image" :size="22"
-        /></span>
-        <span class="result-info"
-          ><strong>{{ item.name_cn || item.name }}</strong
-          ><small v-if="item.name_cn && item.name !== item.name_cn">{{
-            item.name
-          }}</small
-          ><span
-            >{{ item.air_date || '动画作品' }}<i>·</i>{{ item.id }}</span
-          ></span
+      <div class="result-list">
+        <button
+          v-for="item in searchResults"
+          :key="item.id"
+          class="result-item"
+          :disabled="loading"
+          @click="selectAnime(item.id, item.name_cn || item.name)"
         >
-        <AppIcon name="chevron" :size="16" />
-      </button>
+          <span class="result-cover">
+            <img
+              v-if="item.image"
+              :src="getImageUrl(item.image, 'h160')"
+              :alt="item.name_cn || item.name"
+              referrerpolicy="no-referrer"
+              loading="lazy"
+              @load="showLoadedImage"
+              @error="hideBrokenImage"
+            />
+            <AppIcon v-else name="image" :size="20" />
+          </span>
+          <span class="result-info">
+            <strong>{{ item.name_cn || item.name }}</strong>
+            <span class="result-meta">
+              {{ item.air_date || '动画作品' }} · ID {{ item.id }}
+            </span>
+          </span>
+          <AppIcon name="chevron" :size="16" />
+        </button>
+      </div>
     </section>
 
     <div
@@ -93,55 +98,65 @@
       class="loading-note"
       role="status"
     >
-      <span class="small-spinner"></span>正在展开这部作品的巡礼地图…
+      <span class="small-spinner"></span>
+      <span>正在加载取景地数据…</span>
     </div>
 
     <template v-if="bangumi">
       <section class="current-anime">
         <div class="section-heading">
-          <h2>正在探索</h2>
+          <h2>当前作品</h2>
           <button class="text-button" :disabled="loading" @click="resetExplore">
-            换部作品 <AppIcon name="arrow" :size="13" />
+            返回推荐
           </button>
         </div>
         <div class="anime-card">
-          <div class="anime-cover">
-            <img
-              v-if="bangumi.cover"
-              :src="bangumi.cover"
-              :alt="bangumi.cn || bangumi.title"
-              @error="hideBrokenImage"
-            /><AppIcon v-else name="image" :size="24" />
+          <div class="anime-card-top">
+            <div class="anime-cover">
+              <img
+                v-if="bangumi.cover"
+                :src="getImageUrl(bangumi.cover, 'h160')"
+                :alt="bangumi.cn || bangumi.title"
+                referrerpolicy="no-referrer"
+                @load="showLoadedImage"
+                @error="hideBrokenImage"
+              />
+              <AppIcon v-else name="image" :size="22" />
+            </div>
+            <div class="anime-details">
+              <h3>{{ bangumi.cn || bangumi.title }}</h3>
+              <p v-if="bangumi.title && bangumi.title !== bangumi.cn" class="anime-sub">
+                {{ bangumi.title }}
+              </p>
+              <span class="anime-city">
+                <AppIcon name="pin" :size="13" />
+                {{ bangumi.city || '日本' }}
+              </span>
+            </div>
           </div>
-          <div class="anime-details">
-            <span class="eyebrow">NOW EXPLORING</span>
-            <h2>{{ bangumi.cn || bangumi.title }}</h2>
-            <p v-if="bangumi.title !== bangumi.cn">{{ bangumi.title }}</p>
-            <span class="anime-city"
-              ><AppIcon name="pin" :size="12" />{{
-                bangumi.city || '巡礼目的地'
-              }}</span
-            >
+          <div class="anime-stats-grid">
+            <div class="stat-box">
+              <strong>{{ points.length }}</strong>
+              <span>场景地标</span>
+            </div>
+            <div class="stat-box">
+              <strong>{{ savedCount }}</strong>
+              <span>已收藏</span>
+            </div>
           </div>
-        </div>
-        <div class="anime-stats">
-          <span
-            ><strong>{{ points.length }}</strong> 个场景坐标</span
-          ><span
-            ><strong>{{ savedCount }}</strong> 个已收藏</span
-          >
         </div>
       </section>
+
       <section v-if="points.length" class="scenes-section">
         <div class="section-heading">
-          <h2>这一帧，在这里</h2>
+          <h2>取景地标列表</h2>
           <button
             class="text-button"
             :disabled="savedCount === points.length"
             @click="collectAll"
           >
-            {{ savedCount === points.length ? '已全部收藏' : '收藏全部'
-            }}<AppIcon name="plus" :size="13" />
+            {{ savedCount === points.length ? '已全部收藏' : '全部收藏' }}
+            <AppIcon v-if="savedCount !== points.length" name="plus" :size="14" />
           </button>
         </div>
         <div class="scene-list">
@@ -152,18 +167,16 @@
             :class="{ selected: selectedPointId === point.id }"
           >
             <button class="scene-select" @click="focusPoint(point)">
-              <span class="scene-number">{{
-                String(index + 1).padStart(2, '0')
-              }}</span
-              ><span class="scene-name"
-                ><strong>{{ point.name }}</strong
-                ><small
-                  >{{ point.ep ? `第 ${point.ep} 集` : '动画取景地'
-                  }}<template v-if="point.s">
-                    · {{ formatTime(point.s) }}</template
-                  ></small
-                ></span
-              >
+              <span class="scene-number">
+                {{ String(index + 1).padStart(2, '0') }}
+              </span>
+              <span class="scene-name">
+                <strong>{{ point.name }}</strong>
+                <span class="scene-meta">
+                  {{ point.ep ? `第 ${point.ep} 集` : '取景地' }}
+                  <template v-if="point.s"> · {{ formatTime(point.s) }}</template>
+                </span>
+              </span>
             </button>
             <button
               class="scene-save icon-button"
@@ -181,7 +194,7 @@
         </div>
       </section>
       <p v-else-if="!loading" class="no-results">
-        这部作品还没有带场景图片的地标，试试探索其他作品。
+        该作品暂无可展示的场景地标。
       </p>
     </template>
 
@@ -190,44 +203,51 @@
     >
       <section class="recommendations">
         <div class="section-heading">
-          <h2>从这些故事开始</h2>
-          <span class="section-caption">PICK A STORY</span>
+          <h2>热门巡礼作品</h2>
+          <button
+            type="button"
+            class="text-button"
+            :disabled="loading"
+            @click="exploreRandom"
+          >
+            <AppIcon name="sparkles" :size="14" />
+            随机探索
+          </button>
         </div>
-        <button
-          v-for="(anime, index) in recommendations"
-          :key="anime.id"
-          class="recommendation-card"
-          :class="anime.color"
-          :disabled="loading"
-          @click="selectAnime(anime.id, anime.name)"
-        >
-          <span class="recommendation-cover"
-            ><img
-              :src="anime.cover"
-              :alt="anime.name"
-              loading="lazy"
-              @error="hideBrokenImage"
-            /><span class="recommendation-index">0{{ index + 1 }}</span></span
+        <div class="recommendation-list">
+          <button
+            v-for="anime in recommendations"
+            :key="anime.id"
+            class="recommendation-card"
+            :disabled="loading"
+            @click="selectAnime(anime.id, anime.name)"
           >
-          <span class="recommendation-info"
-            ><small>{{ anime.theme }}</small
-            ><strong>{{ anime.name }}</strong
-            ><span
-              ><AppIcon name="pin" :size="11" />{{ anime.location }}</span
-            ></span
-          >
-          <span class="recommendation-arrow"
-            ><AppIcon name="arrow" :size="16"
-          /></span>
-        </button>
+            <span class="recommendation-cover">
+              <img
+                :src="getImageUrl(anime.cover, 'h160')"
+                :alt="anime.name"
+                referrerpolicy="no-referrer"
+                loading="lazy"
+                @load="showLoadedImage"
+                @error="hideBrokenImage"
+              />
+            </span>
+            <span class="recommendation-info">
+              <strong>{{ anime.name }}</strong>
+              <span v-if="anime.scenes" class="recommendation-scenes">
+                {{ anime.scenes }}
+              </span>
+              <span class="recommendation-location">
+                <AppIcon name="pin" :size="12" />
+                {{ anime.location }}
+              </span>
+            </span>
+            <span class="recommendation-arrow">
+              <AppIcon name="chevron" :size="16" />
+            </span>
+          </button>
+        </div>
       </section>
-      <div class="journey-note">
-        <span class="note-icon"><AppIcon name="bookmark" :size="18" /></span>
-        <div>
-          <strong>先收藏心动，再决定出发</strong>
-          <p>跨作品收藏地标，让 AI 为你串起旅程。</p>
-        </div>
-      </div>
     </template>
   </section>
 </template>
@@ -238,6 +258,7 @@ import { storeToRefs } from 'pinia'
 import { ElMessage } from 'element-plus'
 import AppIcon from './AppIcon.vue'
 import { recommendations } from '../utils/recommendations'
+import { getImageUrl } from '../utils/imageUrl'
 import { useAppStore } from '../stores/app'
 
 const emit = defineEmits(['show-map'])
@@ -253,6 +274,12 @@ const {
 } = storeToRefs(store)
 const searchText = ref('')
 const hasSearched = ref(false)
+const quickTags = [
+  { id: 160209, name: '你的名字。' },
+  { id: 328609, name: '孤独摇滚！' },
+  { id: 117777, name: '声之形' },
+  { id: 269235, name: '天气之子' }
+]
 const savedCount = computed(
   () => points.value.filter((point) => store.isInLibrary(point.id)).length
 )
@@ -289,7 +316,14 @@ async function selectAnime(id, name) {
     await store.searchBangumi(id)
     emit('show-map')
   } catch {
-    // The store exposes a readable error beside the search field.
+    // Error is displayed via store.error
+  }
+}
+function exploreRandom() {
+  const randomItem =
+    recommendations[Math.floor(Math.random() * recommendations.length)]
+  if (randomItem) {
+    selectAnime(randomItem.id, randomItem.name)
   }
 }
 function closeResults() {
@@ -314,10 +348,13 @@ function toggleSave(point) {
 function collectAll() {
   const previous = savedCount.value
   points.value.forEach((point) => store.addToLibrary(point))
-  ElMessage.success(`已收藏 ${savedCount.value - previous} 个场景坐标`)
+  ElMessage.success(`已收藏 ${savedCount.value - previous} 个场景地标`)
 }
 function hideBrokenImage(event) {
   event.target.style.visibility = 'hidden'
+}
+function showLoadedImage(event) {
+  event.target.style.visibility = ''
 }
 function formatTime(seconds) {
   return `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, '0')}`
@@ -330,105 +367,85 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .search-panel {
-  padding: 6px 0 2px;
-}
-.search-intro {
-  position: relative;
-  padding: 2px 0 25px;
-}
-.search-intro .eyebrow {
-  font-size: 9px;
-  letter-spacing: 1.7px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.tiny-line {
-  width: 17px;
-  height: 1px;
-  background: #899677;
-}
-.search-intro h1 {
-  font-size: clamp(30px, 2.4vw, 38px);
-  line-height: 1.5;
-  font-weight: 650;
-  letter-spacing: 2px;
-  margin: 20px 0 11px;
-}
-.title-dot {
-  color: var(--accent-color);
-}
-.search-intro > p {
-  font-size: 12px;
-  line-height: 1.9;
-  color: var(--text-secondary);
-}
-.intro-stamp {
-  position: absolute;
-  right: 8px;
-  top: 68px;
-  color: #a98c6a;
-  font-family: 'KaiTi', 'STKaiti', serif;
-  font-size: 29px;
-  border: 1px solid #a98c6a70;
-  border-radius: 50%;
-  width: 53px;
-  height: 61px;
   display: flex;
   flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  transform: rotate(12deg);
-  opacity: 0.7;
+  gap: 18px;
 }
-.intro-stamp small {
-  font-family: serif;
-  font-size: 8px;
-  letter-spacing: 3px;
+
+.panel-hero {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
-.search-form {
-  margin-bottom: 28px;
-}
-.search-label {
-  display: block;
-  font-size: 12px;
+
+.panel-hero h1 {
+  font-size: 19px;
   font-weight: 600;
-  margin-bottom: 11px;
+  color: var(--text-color);
+  letter-spacing: 0.3px;
 }
+
+.panel-hero p {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.search-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  background: rgba(255, 255, 255, 0.62);
+  border: 1px solid rgba(255, 255, 255, 0.85);
+  border-radius: 16px;
+  box-shadow: 0 2px 12px rgba(15, 23, 42, 0.03);
+}
+
+.search-form {
+  margin: 0;
+}
+
 .search-field {
   display: flex;
   align-items: center;
   gap: 10px;
-  height: 48px;
-  padding: 5px 6px 5px 13px;
-  border: 1px solid #d5ddce;
+  height: 44px;
+  padding: 4px 5px 4px 13px;
+  border: 1px solid var(--border-color);
   border-radius: 11px;
-  background: var(--surface-color);
-  color: #8b9580;
-  transition: box-shadow 0.2s;
+  background: rgba(255, 255, 255, 0.9);
+  color: var(--text-secondary);
+  transition: all 0.2s ease;
 }
+
 .search-field:focus-within {
-  border-color: #779071;
-  box-shadow: 0 0 0 3px #65845410;
+  border-color: var(--primary-color);
+  background: #ffffff;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
 }
+
 .search-field > svg {
   flex-shrink: 0;
 }
+
 .search-field input {
   width: 100%;
   min-width: 0;
   border: 0;
   background: transparent;
-  font-size: 12px;
+  font-size: 14px;
   outline: 0;
   color: var(--text-color);
 }
+
 .search-field input::placeholder {
-  color: #919988;
+  color: var(--text-muted);
 }
+
 .search-field button {
   border: 0;
-  border-radius: 7px;
+  border-radius: 8px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -436,441 +453,472 @@ onBeforeUnmount(() => {
   height: 34px;
   flex-shrink: 0;
   background: var(--primary-color);
-  color: #fff;
+  color: #ffffff;
   cursor: pointer;
+  transition: background 0.18s ease;
 }
+
+.search-field button:hover:not(:disabled) {
+  background: var(--primary-hover);
+}
+
 .search-field button:disabled {
-  background: #e9ede3;
-  color: #9ea894;
+  background: rgba(15, 23, 42, 0.06);
+  color: var(--text-muted);
   cursor: default;
 }
-.search-hint {
+
+.quick-tags {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-top: 9px;
-  font-size: 9px;
-  color: #8f9687;
+  flex-wrap: wrap;
+  gap: 6px;
 }
-.search-hint kbd {
-  padding: 0 4px;
-  border: 1px solid #dfe2d7;
-  border-radius: 3px;
-  font-size: 10px;
-}
-.search-error {
-  margin: -10px 0 20px;
-}
-.search-error :deep(.el-alert) {
-  font-size: 11px;
-  padding: 10px;
-}
-.search-error > p {
-  font-size: 10px;
+
+.quick-tag {
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(15, 23, 42, 0.07);
+  background: rgba(255, 255, 255, 0.78);
   color: var(--text-secondary);
-  line-height: 1.8;
-  margin-top: 9px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.16s ease;
 }
+
+.quick-tag:hover:not(:disabled) {
+  color: var(--primary-color);
+  border-color: rgba(37, 99, 235, 0.28);
+  background: rgba(37, 99, 235, 0.06);
+}
+
+.search-error :deep(.el-alert) {
+  border-radius: 10px;
+}
+
 .section-heading {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  margin-bottom: 13px;
+  margin-bottom: 10px;
 }
+
 .section-heading h2 {
-  font-size: 13px;
-  font-weight: 650;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-color);
 }
+
 .section-heading h2 > span {
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: 13px;
+  font-weight: 500;
   margin-left: 4px;
 }
-.section-caption {
-  color: #939b89;
-  letter-spacing: 1.4px;
-  font-size: 8px;
+
+.recommendation-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
+
 .recommendation-card {
   display: flex;
   align-items: center;
   gap: 13px;
   width: 100%;
-  padding: 9px;
-  margin-bottom: 10px;
-  border: 1px solid #e4e6dc;
-  background: #fcfcf6;
-  border-radius: 12px;
+  padding: 11px;
+  border: 1px solid rgba(255, 255, 255, 0.85);
+  background: rgba(255, 255, 255, 0.68);
+  border-radius: 15px;
   text-align: left;
   cursor: pointer;
   color: var(--text-color);
-  transition:
-    transform 0.2s,
-    border-color 0.2s,
-    background 0.2s;
+  box-shadow: 0 2px 10px rgba(15, 23, 42, 0.03);
+  transition: all 0.2s ease;
 }
+
 .recommendation-card:hover:not(:disabled) {
-  transform: translateX(3px);
-  border-color: #aeba9e;
-  background: #fffef9;
+  transform: translateY(-1px);
+  border-color: rgba(37, 99, 235, 0.28);
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 6px 18px rgba(15, 23, 42, 0.06);
 }
+
 .recommendation-card:disabled {
   opacity: 0.55;
 }
+
 .recommendation-cover {
-  position: relative;
-  width: 64px;
-  height: 80px;
-  border-radius: 7px;
+  width: 58px;
+  height: 76px;
+  border-radius: 9px;
   flex-shrink: 0;
   overflow: hidden;
-  background: #e0e6d6;
+  background: rgba(15, 23, 42, 0.05);
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.08);
 }
-.peach .recommendation-cover {
-  background: #f0e2d4;
-}
-.blue .recommendation-cover {
-  background: #dce7e9;
-}
+
 .recommendation-cover img {
   width: 100%;
   height: 100%;
   object-fit: cover;
 }
-.recommendation-index {
-  position: absolute;
-  bottom: 5px;
-  left: 5px;
-  color: #fff;
-  font-family: Georgia, serif;
-  font-size: 12px;
-  background: #233d3a90;
-  padding: 2px 4px;
-  border-radius: 3px;
-}
+
 .recommendation-info {
   flex: 1;
   min-width: 0;
-}
-.recommendation-info > small {
-  display: block;
-  color: #949a86;
-  font-size: 9px;
-  margin-bottom: 7px;
-  letter-spacing: 1px;
-}
-.recommendation-info > strong {
-  font-size: 13px;
-  display: block;
-  line-height: 1.45;
-  font-weight: 650;
-}
-.recommendation-info > span {
   display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 5px;
+}
+
+.recommendation-info > strong {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--text-color);
+}
+
+.recommendation-scenes {
+  font-size: 12px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+.recommendation-location {
+  display: inline-flex;
   align-items: center;
   gap: 4px;
-  font-size: 10px;
-  margin-top: 8px;
-  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--primary-color);
+  background: rgba(37, 99, 235, 0.08);
+  padding: 2px 8px;
+  border-radius: 999px;
 }
+
 .recommendation-arrow {
   display: flex;
-  color: #8c9b80;
-  margin-right: 3px;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: rgba(15, 23, 42, 0.04);
+  color: var(--text-secondary);
+  flex-shrink: 0;
+  transition: all 0.18s ease;
 }
-.journey-note {
+
+.recommendation-card:hover .recommendation-arrow {
+  background: var(--primary-soft);
+  color: var(--primary-color);
+}
+
+.result-list {
   display: flex;
-  gap: 10px;
-  padding: 16px 0 8px;
-  align-items: flex-start;
+  flex-direction: column;
+  gap: 6px;
 }
-.note-icon {
-  color: #98a588;
-  padding-top: 2px;
-}
-.journey-note strong {
-  font-size: 11px;
-  font-weight: 500;
-  color: #78866d;
-}
-.journey-note p {
-  font-size: 10px;
-  color: #929a89;
-  margin-top: 5px;
-  line-height: 1.7;
-}
+
 .result-item {
-  border: 0;
-  border-bottom: 1px solid var(--border-color);
-  background: none;
+  border: 1px solid rgba(255, 255, 255, 0.8);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.65);
   width: 100%;
-  padding: 12px 3px;
+  padding: 10px;
   display: flex;
   text-align: left;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   cursor: pointer;
   color: var(--text-secondary);
+  transition: all 0.18s ease;
 }
-.result-item:hover {
-  background: var(--primary-soft);
+
+.result-item:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.94);
+  border-color: rgba(37, 99, 235, 0.25);
 }
+
 .result-cover {
   display: grid;
   place-items: center;
-  width: 43px;
+  width: 44px;
   height: 58px;
-  background: var(--primary-soft);
-  border-radius: 5px;
+  background: rgba(15, 23, 42, 0.05);
+  border-radius: 7px;
   overflow: hidden;
   flex-shrink: 0;
 }
+
 .result-cover img {
   width: 100%;
   height: 100%;
   object-fit: cover;
 }
+
 .result-info {
   flex: 1;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
+
 .result-info strong {
-  display: block;
-  font-size: 12px;
+  font-size: 14px;
+  font-weight: 600;
   color: var(--text-color);
-  line-height: 1.5;
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.result-info small {
-  display: block;
-  font-size: 10px;
-  margin-top: 3px;
+
+.result-meta {
+  font-size: 12px;
+  color: var(--text-secondary);
 }
-.result-info > span {
-  display: block;
-  font-size: 9px;
-  margin-top: 6px;
-}
-.result-info i {
-  font-style: normal;
-  padding: 0 5px;
-}
+
 .no-results {
   color: var(--text-secondary);
-  font-size: 12px;
-  line-height: 1.8;
-  background: var(--primary-soft);
-  border-radius: 10px;
-  padding: 18px;
-  margin-bottom: 20px;
+  font-size: 13px;
+  line-height: 1.6;
+  background: rgba(255, 255, 255, 0.65);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  padding: 16px;
+  text-align: center;
 }
+
 .loading-note {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 10px;
   color: var(--primary-color);
-  font-size: 12px;
-  padding: 14px 0;
+  font-size: 13px;
+  padding: 12px 0;
 }
+
 .small-spinner {
-  width: 15px;
-  height: 15px;
-  border: 2px solid #a7b697;
+  width: 16px;
+  height: 16px;
+  border: 2px solid rgba(37, 99, 235, 0.2);
   border-top-color: var(--primary-color);
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
   flex-shrink: 0;
 }
+
 @keyframes spin {
   to {
     transform: rotate(360deg);
   }
 }
-.current-anime {
-  margin-top: 20px;
-}
+
 .anime-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+  background: rgba(255, 255, 255, 0.78);
+  border: 1px solid rgba(255, 255, 255, 0.9);
+  border-radius: 16px;
+  box-shadow: 0 2px 12px rgba(15, 23, 42, 0.04);
+}
+
+.anime-card-top {
   display: flex;
   align-items: center;
   gap: 14px;
-  padding: 14px;
-  background: #ecefe3;
-  border: 1px solid #e0e5d6;
-  border-radius: 12px;
 }
+
 .anime-cover {
   display: grid;
   place-items: center;
   flex-shrink: 0;
-  width: 60px;
+  width: 62px;
   height: 86px;
   overflow: hidden;
-  border-radius: 6px;
-  background: #d9e0cc;
+  border-radius: 9px;
+  background: rgba(15, 23, 42, 0.05);
 }
+
 .anime-cover img {
   width: 100%;
   height: 100%;
   object-fit: cover;
 }
+
 .anime-details {
+  flex: 1;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 5px;
 }
-.anime-details .eyebrow {
-  font-size: 7px;
-  letter-spacing: 1.4px;
-}
-.anime-details h2 {
+
+.anime-details h3 {
   font-size: 15px;
-  margin: 8px 0 5px;
-  line-height: 1.5;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--text-color);
 }
-.anime-details p {
-  font-size: 10px;
+
+.anime-sub {
+  font-size: 12px;
   color: var(--text-secondary);
-  line-height: 1.6;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
 }
+
 .anime-city {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  color: #738166;
-  font-size: 10px;
-  margin-top: 8px;
-}
-.anime-stats {
-  display: flex;
-  justify-content: space-around;
-  padding: 16px 0;
-  margin-bottom: 12px;
-  border-bottom: 1px solid var(--border-color);
-  color: var(--text-secondary);
-  font-size: 10px;
-}
-.anime-stats > span + span {
-  border-left: 1px solid var(--border-color);
-  padding-left: 20px;
-}
-.anime-stats strong {
-  font-size: 19px;
-  font-weight: 550;
   color: var(--primary-color);
-  margin-right: 4px;
+  background: var(--primary-soft);
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 500;
 }
-.scenes-section .section-heading {
-  margin-bottom: 6px;
+
+.anime-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-color);
 }
+
+.stat-box {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.03);
+}
+
+.stat-box strong {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--primary-color);
+}
+
+.stat-box span {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.scene-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
 .scene-row {
   display: flex;
-  gap: 6px;
+  gap: 8px;
   align-items: center;
-  padding: 4px 5px 4px 0;
-  border-bottom: 1px solid #e4e7dc;
-  border-radius: 6px;
+  padding: 5px 8px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.55);
+  border: 1px solid transparent;
+  transition: all 0.15s ease;
 }
+
+.scene-row:hover {
+  background: rgba(255, 255, 255, 0.88);
+  border-color: rgba(15, 23, 42, 0.06);
+}
+
 .scene-row.selected {
-  background: #e9eee1;
+  background: var(--primary-soft);
+  border-color: rgba(37, 99, 235, 0.22);
 }
+
 .scene-select {
   flex: 1;
   min-width: 0;
   display: flex;
   align-items: center;
   text-align: left;
-  gap: 11px;
-  padding: 10px 5px;
+  gap: 12px;
+  padding: 6px 2px;
   border: 0;
   background: none;
   color: var(--text-color);
   cursor: pointer;
 }
+
 .scene-number {
-  color: #9ba68f;
-  font-family: Georgia, serif;
-  font-size: 16px;
-  width: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.05);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
   flex-shrink: 0;
 }
+
+.scene-row.selected .scene-number {
+  background: var(--primary-color);
+  color: #ffffff;
+}
+
 .scene-name {
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
+
 .scene-name strong {
   display: block;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 500;
-  line-height: 1.5;
+  line-height: 1.4;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.scene-name small {
+
+.scene-meta {
   display: block;
-  font-size: 9px;
+  font-size: 12px;
   color: var(--text-secondary);
-  margin-top: 4px;
 }
+
 .scene-save {
-  width: 27px;
-  height: 27px;
-  border: 1px solid #dce2d3;
-  border-radius: 7px;
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.8);
   flex-shrink: 0;
 }
+
 .scene-save.saved {
   background: var(--primary-color);
-  color: white;
+  color: #ffffff;
   border-color: var(--primary-color);
-}
-@media (max-height: 800px) and (min-width: 821px) {
-  .search-intro {
-    padding-bottom: 20px;
-  }
-  .search-intro h1 {
-    font-size: 30px;
-    margin-top: 14px;
-  }
-  .search-form {
-    margin-bottom: 22px;
-  }
-  .recommendation-cover {
-    width: 51px;
-    height: 64px;
-  }
-  .recommendation-card {
-    padding: 8px;
-    margin-bottom: 8px;
-    gap: 10px;
-  }
-  .recommendation-info > small {
-    margin-bottom: 4px;
-  }
-  .recommendation-info > span {
-    margin-top: 5px;
-  }
-  .journey-note {
-    padding-top: 12px;
-  }
-}
-@media (max-width: 820px) {
-  .search-intro h1 {
-    font-size: 34px;
-  }
-  .search-intro {
-    padding-bottom: 22px;
-  }
-  .search-intro > p br {
-    display: none;
-  }
-  .intro-stamp {
-    right: 20px;
-    top: 55px;
-  }
-  .recommendation-cover {
-    width: 64px;
-    height: 76px;
-  }
-  .search-form {
-    margin-bottom: 26px;
-  }
 }
 </style>
