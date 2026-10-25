@@ -1,6 +1,6 @@
-# 🎌 动漫圣地巡礼旅游规划工具
+# 巡礼手帖 · 动漫圣地巡礼旅游规划工具
 
-An interactive SPA for anime pilgrimage ("圣地巡礼") route planning — explore, collect, and plan multi-day trips to real-world anime filming locations.
+基于 Vue 3 与 Python LangGraph 的动漫取景地探索和行程规划工具。从作品搜索、地图浏览、跨作品收藏，到生成多日巡礼行程，在同一个工作台完成。
 
 <p align="center">
   <img src="https://img.shields.io/badge/Vue-3.4-4FC08D?logo=vue.js" alt="Vue 3">
@@ -13,51 +13,47 @@ An interactive SPA for anime pilgrimage ("圣地巡礼") route planning — expl
 
 ## ✨ 功能特性
 
-- 🔍 **动漫作品搜索** — 优先从项目内置的 Anitabi 作品索引搜索名称，未命中时联网补充；也支持直接输入 Bangumi ID
-- 🗺️ **取景地地图浏览** — 在 Leaflet 交互地图上查看真实取景地，支持 CartoDB / 高德地图切换
-- 📸 **图像对比叠加** — 动画截图 vs 实地照片的并排对比，支持独立缩放/平移
-- ⭐ **跨作品坐标库** — 收藏来自不同动漫的取景地，构建个人巡礼清单
-- 🧭 **三种路线规划方案**：
-  - **本地聚类** — 基于 Turf.js K-Means 空间聚类 + 最近邻排序，纯前端计算
-  - **云端 AI** — 调用火山引擎 Ark API 等兼容 OpenAI 的云端大模型
-  - **本地 AI** — 对接本地 LM Studio / Ollama 大模型
-  - **智能体 (Agent)** — 基于 LangGraph 的结构化规划（资料检索 → 分天 → 程序校验与内容审核 → 场景说明），地图、逐日列表、文字和历史共用同一份 Plan
-- 👁️ **视觉场景分析** — 配置 MiMo 后可参考 Anitabi 截图生成图像观察和拍照建议；缺失或失败时显示提示，不把截图推测当成已核实事实
-- 🔎 **多策略联网检索** — Agent 模式下 `get_anime_scene` 采用中文/日文/英文/站点定向多 query 召回 + 相关性打分 + DuckDuckGo 备用搜索，覆盖知乎、Bilibili、巴哈姆特、日文舞台探访博客等真实巡礼内容来源
-- 🧠 **RAG 增强检索** — 人机协同的向量检索系统，核心 query 优先 + 站点定向 fallback 联网抓取巡礼攻略，人工审核后入库
-- 📋 **历史记录** — 路线规划结果持久化存储，支持回看和重新加载
+- **发现圣地** — 名称或 Bangumi ID 搜索，内置作品索引、推荐作品与随机探索；本地未命中时联网补充。
+- **取景地地图** — Leaflet 地图支持 OpenStreetMap / 高德底图切换，联动地标列表、截图弹窗和底部地标卡片。
+- **照片对照** — 动画截图与用户选择的实景照片并排预览，两张图片可分别缩放。实景照片仅在浏览器本地预览。
+- **我的巡礼** — 跨作品收藏地标，勾选本次行程地点并设置 1–7 天，支持批量收藏与移除。
+- **三种 AI 方案** — 云端服务、本地模型与 Python Agent。云端和本地模式生成 Markdown；Agent v2 生成可校验的结构化 Plan。
+- **结构化行程** — Agent 的地图连线、逐日点位、文字说明和历史记录共用一份 Plan；支持进度提示、取消、来源展示与失败草案。
+- **RAG 与截图分析** — 已有知识召回、Tavily 联网补充、人工审核入库；可选 MiMo 提供截图观察和拍照建议。
+- **旅途档案与数据中心** — 回看历史行程，管理待审核切片、已入库地标、运行日志、召回测试与 Agent 调用追踪。
+- **响应式界面** — 浅色毛玻璃工作台，移动端支持侧栏内容与地图切换。
+
+AI 设置与路线历史保存到当前浏览器的 `localStorage`；**当前收藏库只保存在页面内存，刷新后会清空**。Agent 新版历史自带地标快照，可恢复行程点位、顺序和说明；在线底图与远程图片仍需网络。
 
 ### Agent 规划结果与精度
 
-Python Agent 默认请求 `POST /api/v2/agent/plan`，提交所选地标的原始 ID、坐标与元数据，以及正整数天数。后端用 SSE 返回运行进度、完整 Plan 或草案、错误码和终态。输入错误在调用模型前返回 `INVALID_INPUT`。旧 `/api/agent/plan` 仍供自定义旧服务兼容；云端和本地模式继续展示文字结果。
+Python Agent 默认请求 `POST /api/v2/agent/plan`，提交所选地标的原始 ID、`[纬度, 经度]` 坐标与元数据，以及正整数天数。后端用 SSE 返回运行进度、完整 Plan 或草案、错误码和终态。输入错误在调用模型前返回 HTTP 422、`INVALID_INPUT` 和字段错误。后端默认最多接受 50 个地标、30 天；当前界面的天数选择为 1–7 天。旧 `/api/agent/plan` 保留为纯文本流兼容接口，已有旧默认地址会自动迁移到 v2。
 
-Plan 固定保存输入快照、逐日点位 ID 顺序、相邻点位直线距离、说明、来源、未安排点与校验结果。程序负责距离和最终文字中的分天顺序；内容审核失败或修复预算耗尽时显示带具体问题的草案，草案不写入成功历史。新历史记录可只靠快照恢复地图、列表和文字，旧历史仍按原方式读取。
+规划流程为 `资料检索 → 分天排线 → 程序校验与内容审核 → 场景说明`，校验失败时默认最多修复 3 次。Plan 保存输入快照、逐日点位 ID 顺序、相邻点位直线距离、说明、来源、未安排点与校验结果。Python 通过最近邻和有界 2-opt 整理每日顺序，并生成与 Plan 一致的文字。审核失败或修复预算耗尽时显示带具体问题的草案，草案不写入成功历史。旧版历史仍通过在线数据重新加载地标。
 
-**距离仅指点位间直线距离。** 不含实际道路、出发地往返、步行时间、公交或铁路班次。没有出发日期时不会把当前天气写成出行天气。旧向量库若缺少可确认的 embedding 配置，仍允许按地标 ID 读取，向量查询与写入暂停，需管理员核实后建立独立版本索引；不会自动清空旧库。
+**距离仅指点位间直线距离。** 不含实际道路、出发地往返、步行时间、公交或铁路班次。当前页面没有出发日期输入，v2 不调用旧版实时天气工具。截图观察会标明未核实或推测内容，资料缺失和检索失败会显示提示。
 
 ---
 
-## 🖼️ 界面预览
+## 使用流程与界面
 
 ```
-┌──────────────────────────────────────────────────────┐
-│  Sidebar                    │  Map (Leaflet)          │
-│  ┌────────────────────┐     │                         │
-│  │  搜索动漫作品        │     │     🗾 交互式地图       │
-│  │  - Bangumi ID      │     │     📍 取景地标记      │
-│  │  - 关键字搜索       │     │     🧭 路线连线        │
-│  └────────────────────┘     │     🖼️ 图片对比        │
-│  ┌────────────────────┐     │                         │
-│  │  坐标库 / 历史记录  │     │                         │
-│  │  - 地标收藏列表     │     │                         │
-│  │  - AI 路线生成      │     │                         │
-│  │  - 规划历史回看     │     │                         │
-│  └────────────────────┘     │                         │
-│                             ├─────────────────────────┤
-│                             │  Landmark Dock (底部横栏)│
-│                             │  ← 横向滚动地标卡片 →    │
-└──────────────────────────────────────────────────────┘
+巡礼手帖   发现圣地 / 我的巡礼 / 旅途档案   数据中心 / AI 设置
+┌──────────────────────┬─────────────────────────────┐
+│ 当前导航对应的工作台    │ Leaflet 地图                │
+│ · 作品搜索与取景地列表  │ · 点位、弹窗与照片对照       │
+│ · 收藏选择与 AI 行程    │ · 分天着色与路线连线         │
+│ · 历史行程回看         ├─────────────────────────────┤
+│                      │ 底部横向地标卡片             │
+└──────────────────────┴─────────────────────────────┘
+移动端：在工作台与「巡礼地图」之间切换
 ```
+
+1. 在「发现圣地」输入作品名或 Bangumi ID，也可点击推荐作品。
+2. 在取景地列表、地图弹窗或底部卡片浏览并收藏地标；可以继续搜索其他作品。
+3. 打开「AI 设置」选择规划方式，按需填写接口、密钥和模型。
+4. 在「我的巡礼」勾选地点、选择天数并生成行程。Agent 模式需先启动 Python 后端。
+5. 在「旅途档案」回看已保存结果；需要审核知识或排查调用过程时打开「数据中心」。
 
 ---
 
@@ -69,7 +65,7 @@ Plan 固定保存输入快照、逐日点位 ID 顺序、相邻点位直线距�
 | 状态管理 | Pinia |
 | UI 组件库 | Element Plus (自动按需导入) |
 | 地图引擎 | Leaflet |
-| 空间算法 | Turf.js (K-Means / 最近邻) |
+| 空间算法 | Python Haversine / 最近邻 / 有界 2-opt；保留 Turf.js 聚类工具 |
 | 构建工具 | Vite 5 |
 | 后端框架 | FastAPI + Uvicorn |
 | AI 框架 | LangChain + LangGraph |
@@ -89,7 +85,7 @@ Plan 固定保存输入快照、逐日点位 ID 顺序、相邻点位直线距�
 | [Anitabi 官网地图数据](https://www.anitabi.cn/d/g.json) | 动漫取景地经纬度、截图、集数信息 | 总索引提供坐标，`gN.json` 分片提供详情，按地标 ID 合并 |
 | [Anitabi 作品数据](https://www.anitabi.cn/d/g.json) / [Bangumi](https://bgm.tv/) | 本地作品索引与在线补充搜索 | 名称未命中时通过 Anitabi 的 Bangumi 搜索服务查询 |
 | [Tavily Search](https://tavily.com/) | 巡礼攻略联网检索 (Agent 模式) | AI 搜索引擎 |
-| [wttr.in](https://wttr.in/) | 目的地实时天气 | 免费天气 API |
+| [wttr.in](https://wttr.in/) | 旧版 Agent 的实时天气工具 | 当前 v2 规划流程不调用 |
 | MiMo v2.5 | 动漫截图视觉分析 (Agent 模式) | 小米多模态视觉模型 |
 
 > **关于 Anitabi**：本项目依赖的地标数据来自 [anitabi.cn](https://anitabi.cn)，文档维护在 [anitabi/anitabi.cn-document](https://github.com/anitabi/anitabi.cn-document)。地标加载现已使用官网地图数据，替代实测缺少 `geo` 的公开 `/bangumi/{id}/lite` 与 `/points/detail` 响应。截图保留来源标注与来源链接。
@@ -147,7 +143,7 @@ location /anitabi-data/ {
 
 缓存未命中时，前端请求 `/bgm/search?keyword=...&cat=2`，由 Vite 转发到 `https://v2-anitabi.magiconch.com/api/bgm/search`，其中 `cat=2` 表示动画。在线搜索失败时分别提示超时、限流、连接错误或响应格式异常；在线接口正常返回空数组时才显示未找到作品。
 
-**使用与更新：** 缓存已放入项目，首次使用无需下载作品索引，正常运行 `npm run dev` 即可；如果开发服务器在本次修改前已启动，请重启以加载新的代理配置。需要收录更新的作品时，手动运行：
+**使用与更新：** 缓存已放入项目，首次使用无需下载作品索引，正常运行 `npm run dev` 即可。修改代理配置后需要重启开发服务器。需要收录更新的作品时，手动运行：
 
 ```bash
 # 更新原始快照及轻量索引
@@ -170,50 +166,109 @@ npm run test:search
 ### 环境要求
 
 - Node.js >= 18
-- Python >= 3.12
-- [uv](https://docs.astral.sh/uv/) (推荐) 或 pip
+- Python >= 3.14（仅 Python Agent / 数据中心功能需要，与 `pyproject.toml` 一致）
+- [uv](https://docs.astral.sh/uv/)（后端依赖管理）
 
 ### 1. 克隆项目
 
 ```bash
-git clone https://github.com/你的用户名/anitabi.git
-cd anitabi
+git clone https://github.com/Soare02/anime-pilgrimage-travel-planner.git
+cd anime-pilgrimage-travel-planner
 ```
 
-### 2. 配置环境变量
+### 2. 安装并启动前端
 
 ```bash
+npm ci
+npm run dev
+```
+
+浏览器访问 `http://localhost:5173`（端口占用时以终端输出为准）。作品搜索、地图与收藏无需启动 Python 服务；在线数据、图片和底图需要联网。云端模式的接口、API Key、模型名称在右上角「AI 设置」填写。本地模式需要先启动 LM Studio / Ollama 等兼容服务，并允许浏览器跨域访问。
+
+### 3. 配置后端环境（可选）
+
+使用 Agent 或数据中心时，在项目根目录复制配置模板。已有 `.env` 时直接编辑，保留现有配置。
+
+```powershell
+# Windows PowerShell
+Copy-Item .env.example .env
+```
+
+```bash
+# macOS / Linux
 cp .env.example .env
 ```
 
-编辑 `.env` 文件，填入你的 API Key：
+按需填写以下配置。`.env` 已被 Git 忽略，不应提交真实密钥。
 
 ```env
-# 前端（在网页 "AI 设置" 中输入，也可留空）
-VITE_ARK_API_KEY=
-VITE_ARK_MODEL=
-
-# 后端 Agent 模式所需
+# Agent 文本模型所需；当前固定使用 deepseek-v4-flash
 DEEPSEEK_API_KEY=your_deepseek_api_key
+
+# RAG 缺失资料联网补充所需
 TAVILY_API_KEY=your_tavily_api_key
 
-# 可选：限制 / 排除搜索域名（默认放开全网，排除 github/stackoverflow 等技术站点）
-# TAVILY_INCLUDE_DOMAINS=        # 留空 = 不限白名单，搜全网
-# TAVILY_EXCLUDE_DOMAINS=github.com,csdn.net,stackoverflow.com,...
+# 留空表示不限制搜索白名单；模板内预填了一组域名，可按需调整
+TAVILY_INCLUDE_DOMAINS=
+# TAVILY_EXCLUDE_DOMAINS=github.com,csdn.net,stackoverflow.com
 
-# MiMo 视觉模型 — Agent 模式中分析动漫截图时使用
+# 可选：MiMo 截图分析
 MIMO_API_KEY=your_mimo_api_key_here
 MIMO_MODEL=mimo-v2.5
 MIMO_BASE_URL=https://token-plan-cn.xiaomimimo.com/v1
+
+# 可选：本地向量检索；维度需与实际模型输出一致
+EMBEDDING_BASE_URL=http://localhost:1234/v1
+EMBEDDING_MODEL=text-embedding-qwen3-embedding-0.6b
+EMBEDDING_DIMENSION=1024
+EMBEDDING_CONFIG_VERSION=1
+EMBEDDING_TIMEOUT_SECONDS=5
+RERANK_BASE_URL=http://localhost:1234/v1
 ```
 
+模板中的 `VITE_ARK_API_KEY`、`VITE_ARK_MODEL` 当前未被前端源码读取；实际配置入口是网页「AI 设置」，其中密钥会随配置保存在当前浏览器。未配置 Tavily 或 MiMo 时，对应资料补充或截图分析不可用，Agent 会显示相关提示。
+
+### 4. 安装并启动 Python 后端
+
+在第二个终端的项目根目录运行：
+
+```bash
+uv sync
+uv run uvicorn server:app --host 127.0.0.1 --port 8000 --reload
+```
+
+后端 API 文档：`http://127.0.0.1:8000/docs`。回到「AI 设置」选择「智能体」，默认接口为 `/api/v2/agent/plan`。
+
+### 5. 启用 RAG 向量检索与重排（可选）
+
+1. 在 [LM Studio](https://lmstudio.ai/) 加载 embedding 模型 `text-embedding-qwen3-embedding-0.6b` 和重排模型 `qwen3-reranker-0.6b`。
+2. 启动 Local Server（默认端口 `1234`），按实际服务地址配置 `EMBEDDING_BASE_URL` / `RERANK_BASE_URL`。
+3. 确认 embedding 模型输出维度与 `EMBEDDING_DIMENSION` 一致。首次启动后端时会自动初始化 `chroma_db/`。
+
+重排器通过 `/v1/responses` 与 token 概率评分，并非通用 `/rerank` 接口。重排失败会保留召回顺序；向量查询失败时，规划流程仍会保留按地标 ID 命中的已有资料并给出提示。
+
+### 调用预算与搜索调优
+
+| 变量 | 默认值 | 作用 |
+|------|--------|------|
+| `AGENT_MAX_LANDMARKS` / `AGENT_MAX_DAYS` | `50` / `30` | 后端请求规模上限 |
+| `AGENT_MAX_REVISIONS` | `3` | 校验失败后的最大修复次数 |
+| `AGENT_MODEL_TIMEOUT_SECONDS` | `45` | 单次模型调用时限 |
+| `AGENT_TOOL_TIMEOUT_SECONDS` | `35` | 单次资料或截图工具调用时限 |
+| `AGENT_RUN_TIMEOUT_SECONDS` | `240` | 整次规划时限，单位秒 |
+| `AGENT_TRACE_DEBUG` | `0` | `1` 开启额外追踪诊断 |
+
+修改后端环境变量后需要重启 Python 服务。
+
 <details>
-<summary><b>🔧 搜索链路可选调优变量</b>（默认值已可用，仅在需要时调整）</summary>
+<summary><b>搜索链路可选调优变量</b></summary>
 
 | 变量 | 默认 | 作用 |
 |------|------|------|
-| `ANIME_SCENE_MAX_QUERIES` | `10` | `get_anime_scene` 单地标最大 query 数 |
-| `ANIME_SCENE_ENABLE_DDG_FALLBACK` | `1` | Tavily 召回不足时是否启用 DuckDuckGo 备用搜索（`0` 关闭） |
+| `ANIME_SCENE_BACKEND` | `direct` | 旧版场景工具的搜索方式：`direct` / `tavily` / `auto` |
+| `DIRECT_SEARCH_ENGINE` | `baidu` | 旧版直接搜索的引擎：`baidu` / `ddg` / `bing` / `both`（百度与 Bing） |
+| `ANIME_SCENE_MAX_QUERIES` | `10` | 旧版 `get_anime_scene` 单地标最大 query 数 |
+| `ANIME_SCENE_ENABLE_DDG_FALLBACK` | `1` | 旧版 Tavily 召回不足时是否启用 DuckDuckGo 备用搜索（`0` 关闭） |
 | `RAG_TAVILY_MAX_QUERIES` | `8` | RAG 预检索单地标总 query 预算 |
 | `RAG_TAVILY_CORE_QUERIES` | `4` | 核心优先 query 数（不超过总预算） |
 | `RAG_TAVILY_SITE_QUERIES` | `3` | 核心召回不足时的站点定向 fallback 数 |
@@ -221,47 +276,47 @@ MIMO_BASE_URL=https://token-plan-cn.xiaomimimo.com/v1
 | `RAG_TAVILY_SEARCH_DEPTH` | `basic` | RAG 预检索 Tavily 深度（`basic`/`advanced`） |
 | `RAG_INGEST_MAX_WORKERS` | `3` | 批量缺失地标预检索并发数 |
 
-> 以上变量均通过 `parse_int_env()` 安全解析：空串 / 非数字 / 未设置均回退默认值，不会导致整批检索失败。
+当前 v2 的联网补充通过 `rag_service.py` 使用 Tavily。`ANIME_SCENE_*` / `DIRECT_SEARCH_ENGINE` 控制旧版 `get_anime_scene` 工具，不切换 v2 的 RAG 搜索后端。整型搜索预算通过 `parse_int_env()` 解析，无效值回退默认值。
 
 </details>
 
-### 3. 安装前端依赖
+---
 
-```bash
-npm install
-```
+## RAG 数据中心与运行追踪
 
-### 4. 安装后端依赖
+当前 Agent v2 优先读取已有地标知识，结合按 ID 召回、向量搜索和本地重排；缺失资料通过 Tavily 搜索补充。新抓取的资料先写入待审核队列，当次规划可以临时引用，并标记为 `unreviewed`。在「数据中心 → 待审核切片」查看来源、编辑切片并批准后，才写入向量库；来源保留 URL、标题、检索时间、关联点位和审核状态。
 
-```bash
-uv sync
-```
+数据中心提供五个面板：待审核切片、已入库地标、运行日志、召回测试、Agent 追踪。追踪按运行展示节点、模型和工具的输入输出，便于排查检索不足、调用失败或行程草案。
 
-### 5. 启动服务
+| 本地文件 | 内容 |
+|----------|------|
+| `chroma_db/` | Chroma 持久化向量集合 |
+| `chroma_db/rag_pending.json` | 待审核资料 |
+| `chroma_db/rag_history.json` | RAG 操作日志 |
+| `chroma_db/agent_traces.json` | 最近最多 50 次 Agent 运行追踪 |
 
-**终端 1 — 前端开发服务器：**
+向量集合绑定 embedding 模型、服务地址、维度和配置版本。旧集合配置缺失或与当前配置不匹配时，暂停向量查询与写入，仍允许按地标 ID 读取。更换模型或维度需核实后建立独立版本索引；系统不会自动迁移或清空旧集合。上述本地数据目录已被 Git 忽略。
 
-```bash
-npm run dev
-```
+## 后端接口
 
-**终端 2 — 后端 Agent 服务（可选，仅在需要 Agent 模式时启动）：**
+完整请求格式可在运行中的 FastAPI `/docs` 查看。
 
-```bash
-uv run uvicorn server:app --host 127.0.0.1 --port 8000 --reload
-```
+| 方法 | 路径 | 用途 |
+|------|------|------|
+| `POST` | `/api/v2/agent/plan` | 结构化规划 SSE，当前默认入口 |
+| `POST` | `/api/agent/plan` | 旧版 Agent 纯文本流兼容入口 |
+| `GET` | `/api/rag/landmarks` | 已入库地标列表 |
+| `GET` | `/api/rag/landmark/{landmark_id}/chunks` | 地标知识切片 |
+| `GET` | `/api/rag/query?query=...` | 召回与重排调试 |
+| `GET` | `/api/rag/pending` | 待审核队列 |
+| `POST` | `/api/rag/pending/approve`、`/api/rag/pending/reject` | 审核通过或拒绝 |
+| `DELETE` | `/api/rag/landmarks/{landmark_id}` | 移除地标知识 |
+| `POST` | `/api/rag/clear` | 清空并重建向量集合 |
+| `GET` / `POST` | `/api/rag/logs` / `/api/rag/logs/clear` | 查看或清空 RAG 日志 |
+| `GET` | `/api/agent/traces`、`/api/agent/trace/{run_id}` | 运行摘要与追踪详情 |
+| `POST` | `/api/agent/traces/clear` | 清空追踪记录 |
 
-浏览器访问 `http://localhost:5173` 即可使用。
-
-### 6. RAG 增强检索（可选）
-
-如需使用 RAG 双阶段检索重排功能：
-
-1. 安装 [LM Studio](https://lmstudio.ai/)
-2. 下载并加载以下模型：
-   - 向量嵌入：`text-embedding-qwen3-embedding-0.6b`
-   - 重排序：`qwen3-reranker-0.6b`
-3. 在 LM Studio 中开启 Local Server（默认端口 `1234`）
+v2 事件包含 `event_id`、`run_id`、`type`、`payload`。正常事件序列为 `run_started → progress… → plan_ready / plan_draft / error → run_finished`；终态为 `success`、`failed` 或 `cancelled`。只有通过校验的完整 Plan 才作为成功结果保存。
 
 ---
 
@@ -270,29 +325,41 @@ uv run uvicorn server:app --host 127.0.0.1 --port 8000 --reload
 ```
 anime-travel/
 ├── src/                          # Vue 3 前端
-│   ├── App.vue                   # 主布局
+│   ├── App.vue                   # 顶部导航、响应式工作台与数据中心入口
 │   ├── main.js                   # 入口文件
 │   ├── style.css                 # 全局样式
 │   ├── stores/app.js             # Pinia 全局状态
 │   ├── utils/
-│   │   ├── api.js                # Anitabi / Bangumi / AI API
-│   │   └── routePlanner.js       # Turf.js 空间聚类路由
+│   │   ├── api.js                # 地图 / 名称搜索 / AI 请求及 SSE 解码
+│   │   ├── anitabiMapData.js     # 官网索引、分片、校验与缓存
+│   │   ├── bangumiSearch.js      # 本地名称搜索与在线补充
+│   │   ├── imageUrl.js           # 图片地址与分辨率适配
+│   │   ├── recommendations.js    # 推荐作品与搜索快捷入口
+│   │   └── routePlanner.js       # 保留的 Turf.js 聚类工具
+│   ├── data/anitabi-search-index.json # 随前端打包的作品索引
 │   └── components/
-│       ├── SearchPanel.vue       # 动漫搜索 + AI 设置
+│       ├── SearchPanel.vue       # 作品搜索、推荐与取景地列表
+│       ├── AiSettingsDialog.vue  # 全局 AI 设置
 │       ├── MapView.vue           # Leaflet 地图核心
-│       ├── CoordinateLibrary.vue # 坐标库 + 历史记录
+│       ├── CoordinateLibrary.vue # 我的巡礼与旅途档案
 │       ├── PlanResult.vue        # Agent Plan 逐日结果、草案和来源
 │       ├── LandmarkDock.vue      # 底部横向地标条
-│       └── RagAdminPanel.vue     # RAG 数据中心管理
+│       ├── RagAdminPanel.vue     # RAG 数据中心与 Agent 追踪
+│       ├── AppIcon.vue           # 公共图标
+│       └── JourneyArtwork.vue    # 界面插画
 ├── server.py                     # FastAPI 后端入口
 ├── agent.py                      # 旧版 Agent 兼容流程与共用模型
 ├── agent_v2.py                   # 结构化 LangGraph 规划与有限修复
+├── agent_trace.py                # 运行追踪与本地持久化
 ├── plan_schema.py                # 请求与 Plan 数据契约
 ├── plan_geometry.py              # 直线距离和确定性排序
 ├── plan_validation.py            # ID、天数、路段及状态校验
 ├── tools.py                      # Agent 工具集（get_anime_scene 多策略搜索 + DDG 备用）
 ├── rag_service.py                # RAG 检索与重排服务
 ├── tavily_config.py              # Tavily 搜索配置 + 共享常量 + parse_int_env
+├── data/anitabi-g.json           # 官网原始索引快照
+├── scripts/update-anitabi-cache.mjs # 搜索缓存更新脚本
+├── tests/                        # 前端 Node 测试与后端 unittest
 ├── pyproject.toml                # Python 依赖 (uv)
 ├── package.json                  # Node.js 依赖
 ├── vite.config.js                # Vite 配置
@@ -303,20 +370,55 @@ anime-travel/
 
 ## 🔧 三种 AI 方案说明
 
-| 方案 | 模式 | 适用场景 | 需要启动的服务 |
-|------|------|----------|---------------|
-| **本地聚类** | 纯前端 Turf.js | 单个作品的快速多日分组 | 无需后端 |
-| **Cloud** | 云端大模型 API | 有火山引擎 / OpenAI 兼容 API Key | Vite 开发服务器 |
-| **Local** | 本地大模型 | 有 LM Studio / Ollama 本地部署 | 本地模型服务 |
-| **Agent** | Python 智能体 + MiMo 视觉 | 多作品综合巡礼，联网检索 + 截图视觉分析 | FastAPI 后端 |
+| 方案 | 默认接口 / 模型 | 结果 | 额外服务 |
+|------|-----------------|------|----------|
+| **Cloud（默认）** | `/ark/bots/chat/completions`；Key 与模型需填写 | Markdown 文字行程 | 云端兼容 Chat Completions 服务 |
+| **Local** | `http://localhost:11434/v1/chat/completions` / `deepseek-r1:7b` | Markdown 文字行程 | LM Studio / Ollama 等本地模型服务 |
+| **Agent** | `/api/v2/agent/plan` / `deepseek-v4-flash` | 结构化 Plan、地图路线、逐日说明及来源 | FastAPI；Tavily、MiMo 与本地 RAG 按需配置 |
 
-在网页 "AI 设置" 对话框中可自由切换，配置自动保存到浏览器。
+在右上角「AI 设置」切换方案。Cloud 和 Local 的地址、Key、模型可编辑；当前 UI 固定使用配置中的 Agent 地址。LM Studio 用户需将 Local 默认地址改为自己的端口和模型名。
+
+Turf.js K-Means + 最近邻算法仍保留在 `src/utils/routePlanner.js` 和 store 中，但当前界面没有调用入口。它不属于上述三种可选 AI 方案。
+
+## 验证与构建
+
+```bash
+# 名称搜索、地图适配与缓存、Agent SSE 与历史快照回归
+npm run test:search
+npm run test:map
+npm run test:agent
+
+# 不加载 Agent / RAG 的后端契约检查
+uv run python -B -m unittest discover -s tests -p test_plan_contract.py
+
+# 后端完整回归（模型和联网调用使用模拟）
+uv run python -B -m unittest discover -s tests -p 'test_*.py'
+
+# 生成 dist/，然后进行本地静态预览
+npm run build
+npm run preview
+```
+
+完整后端回归导入 RAG 模块时会初始化或打开本地 `chroma_db/`。前端回归覆盖 SSE 分块、中断、终态、草案状态和快照恢复；不需要真实模型密钥。前端尚未配置统一 `npm test` 命令。
+
+### 生产部署
+
+`npm run preview` 默认继承 `vite.config.js` 中的开发代理，可用于本地构建检查；单独部署 `dist/` 静态文件时，需按所用功能配置反向代理：
+
+| 前缀 | 上游 | 路径处理 |
+|------|------|----------|
+| `/anitabi-data/` | `https://www.anitabi.cn/d/` | 将前缀替换为 `/d/` |
+| `/bgm/` | `https://v2-anitabi.magiconch.com/api/bgm/` | 将前缀替换为 `/api/bgm/` |
+| `/ark/` | `https://ark.cn-beijing.volces.com/api/v3/` | 将前缀替换为 `/api/v3/` |
+| `/api/` | `http://127.0.0.1:8000/api/` | 保留原请求路径 |
+
+Agent 的 SSE 转发需要关闭响应缓冲，并设置足够的读取超时。后端当前面向本机个人使用，没有内置鉴权，CORS 默认仅允许 `http://localhost:5173` 和 `http://127.0.0.1:5173`；对外提供数据中心前需在部署层添加访问控制。
 
 ---
 
 ## 🤝 致谢
 
-- [Anitabi](https://anitabi.cn) / [anitabi.cn-document](https://github.com/anitabi/anitabi.cn-document) — 提供开源动漫取景地数据库和公开 API
+- [Anitabi](https://anitabi.cn) / [anitabi.cn-document](https://github.com/anitabi/anitabi.cn-document) — 动漫取景地数据与使用文档
 - [Bangumi](https://bgm.tv) — ACG 作品索引与搜索
 - [Leaflet](https://leafletjs.com/) — 开源交互式地图库
 - [Turf.js](https://turfjs.org/) — 浏览器端地理空间分析
