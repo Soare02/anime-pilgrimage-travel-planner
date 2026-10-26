@@ -387,7 +387,12 @@
                     v-for="(pt, idx) in expandedCache[record.id].landmarkList"
                     :key="pt.id"
                     class="history-landmark-item"
-                    @click="handleHistoryLandmarkClick(pt)"
+                    role="button"
+                    tabindex="0"
+                    :aria-label="`在地图查看 ${pt.cn || pt.name || pt.id}`"
+                    @click="focusPlanPoint(pt)"
+                    @keydown.enter.self="focusPlanPoint(pt)"
+                    @keydown.space.self.prevent="focusPlanPoint(pt)"
                   >
                     <span class="hl-index">{{ idx + 1 }}</span>
                     <div class="hl-info">
@@ -692,7 +697,7 @@ function toggleExpand(record) {
     return
   }
   expandedId.value = record.id
-  store.restoreRouteHistory(record)
+  store.restoreRouteHistory(record, expandedCache[record.id]?.landmarkList || [])
   if (record.plan) {
     expandedCache[record.id] = {
       loading: false,
@@ -746,31 +751,8 @@ async function loadHistoryDetail(record) {
     expandedCache[record.id].landmarkList = landmarkList
     expandedCache[record.id].loading = false
     expandedCache[record.id].failedCount = failedCount + missedCount
+    if (expandedId.value === record.id) store.historyLandmarks = landmarkList
   }
-}
-
-function handleHistoryLandmarkClick(pt) {
-  const exists = store.coordinateLibrary.some((e) => e.id === pt.id)
-  if (exists) {
-    ElMessage.info('该地标已在坐标库中')
-    return
-  }
-  store.coordinateLibrary.push({
-    id: pt.id,
-    name: pt.cn || pt.name || pt.id,
-    originalName: pt.name || '',
-    image: pt.image || '',
-    ep: pt.ep,
-    s: pt.s,
-    geo: pt.geo,
-    origin: pt.origin || '',
-    originURL: pt.originURL || '',
-    bangumiId: pt.bangumiId || null,
-    bangumiName: pt.bangumiName || '',
-    bangumiOriginalName: pt.bangumiOriginalName || '',
-    checked: true
-  })
-  ElMessage.success('已添加到坐标库')
 }
 
 async function handleDelete(id) {
@@ -828,6 +810,10 @@ function focusLandmark(entry) {
 }
 
 function focusPlanPoint(point) {
+  if (!hasValidGeo(point)) {
+    ElMessage.warning('该地标缺少有效坐标，无法在地图上定位')
+    return
+  }
   store.selectPoint(point.id)
   emit('show-map')
 }

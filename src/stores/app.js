@@ -27,6 +27,7 @@ export const useAppStore = defineStore('app', () => {
   const currentRunId = ref(null)
   const currentPlan = ref(null)
   const historyPlan = ref(null)
+  const historyLandmarks = ref([])
   const planningProgress = ref('')
   const runStatus = ref('idle')
   const historySaveError = ref('')
@@ -388,10 +389,13 @@ export const useAppStore = defineStore('app', () => {
     libraryAiResponse.value = ''
   }
 
-  function restoreRouteHistory(record) {
+  function restoreRouteHistory(record, legacyLandmarks = []) {
     cancelLibraryItinerary()
     currentPlan.value = null
     historyPlan.value = null
+    historyLandmarks.value = cloneLandmarks(
+      record?.landmarkSnapshot || record?.plan?.request_snapshot?.landmarks || legacyLandmarks
+    )
     libraryItinerary.value = []
     generatedLandmarks.value = []
     currentRequestSnapshot.value = null
@@ -404,7 +408,7 @@ export const useAppStore = defineStore('app', () => {
       return false
     }
     const plan = record.plan
-    const snapshot = record.landmarkSnapshot || plan.request_snapshot?.landmarks || []
+    const snapshot = historyLandmarks.value
     generatedLandmarks.value = cloneLandmarks(snapshot)
     currentRequestSnapshot.value = {
       days: record.days || plan.request_snapshot?.days || 1,
@@ -554,6 +558,7 @@ export const useAppStore = defineStore('app', () => {
     currentRunId,
     currentPlan,
     historyPlan,
+    historyLandmarks,
     planningProgress,
     runStatus,
     historySaveError,

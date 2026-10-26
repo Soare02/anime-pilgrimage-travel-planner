@@ -15,7 +15,13 @@ let vite
 let generateAIRoute
 let useAppStore
 before(async () => {
-  vite = await createServer({ server: { middlewareMode: true }, appType: 'custom' })
+  vite = await createServer({
+    configFile: false,
+    cacheDir: `verification_artifacts/vite-agent-tests-${process.pid}`,
+    server: { middlewareMode: true, hmr: false },
+    appType: 'custom',
+    optimizeDeps: { noDiscovery: true }
+  })
   ;({ generateAIRoute } = await vite.ssrLoadModule('/src/utils/api.js'))
   ;({ useAppStore } = await vite.ssrLoadModule('/src/stores/app.js'))
 })
@@ -113,4 +119,41 @@ test('saved Plan restores point order and snapshot without remote data', () => {
   assert.equal(store.generatedLandmarks[0].bangumiName, '作品甲')
   assert.equal(store.currentPlan.plan_id, 'plan-fixed')
   assert.equal(store.libraryAiResponse, '# 行程')
+  assert.deepEqual(store.historyLandmarks, snapshot)
+  assert.deepEqual(store.coordinateLibrary, [])
+})
+
+test('legacy archive points can be focused repeatedly without changing the pilgrimage library', () => {
+  storage.clear()
+  setActivePinia(createPinia())
+  const store = useAppStore()
+  const exploration = { id: 'explore', name: '探索中的地标', geo: [35.6, 139.7] }
+  const saved = { id: 'saved', name: '已有收藏', geo: [35.1, 135.7], checked: false }
+  const archivePoints = [
+    { id: 'archive', name: '档案地标', geo: [34.89, 135.8], bangumiId: 115908 }
+  ]
+  store.points = [exploration]
+  store.coordinateLibrary = [saved]
+  store.activePanel = 'history'
+  const record = { id: 'legacy', days: 1, landmarks: [{ id: 'archive', bangumiId: 115908 }], aiResponse: '# 旧行程' }
+
+  store.restoreRouteHistory(record, archivePoints)
+  const previousFocus = store.mapFocusRequest
+  store.selectPoint(store.historyLandmarks[0].id)
+  store.selectPoint(store.historyLandmarks[0].id)
+  assert.equal(store.selectedPointId, 'archive')
+  assert.equal(store.mapFocusRequest, previousFocus + 2)
+  assert.deepEqual(store.historyLandmarks, archivePoints)
+  assert.deepEqual(store.coordinateLibrary, [saved])
+  assert.deepEqual(store.points, [exploration])
+  assert.equal(store.historyPlan, null)
+
+  // Loading a different record cannot leave the previous archive's markers behind.
+  store.restoreRouteHistory({ id: 'other', landmarks: [] })
+  assert.deepEqual(store.historyLandmarks, [])
+  // Reopening cached details restores the archived coordinates without collecting them.
+  store.restoreRouteHistory(record, archivePoints)
+  store.historyLandmarks[0].geo[0] = 0
+  assert.equal(archivePoints[0].geo[0], 34.89)
+  assert.deepEqual(store.coordinateLibrary, [saved])
 })

@@ -221,17 +221,21 @@ const planComplete = computed(
     activePlan.value.validation?.passed === true
 )
 const mapPoints = computed(() =>
-  activePlan.value
-    ? store.generatedLandmarks
-    : store.activePanel === 'library' && store.coordinateLibrary.length
-      ? store.coordinateLibrary
-      : store.points
+  store.activePanel === 'history'
+    ? store.historyLandmarks
+    : activePlan.value
+      ? store.generatedLandmarks
+      : store.activePanel === 'library' && store.coordinateLibrary.length
+        ? store.coordinateLibrary
+        : store.points
 )
 const locationLabel = computed(() =>
-  activePlan.value ||
-  (store.activePanel === 'library' && store.coordinateLibrary.length)
-    ? '我的巡礼地图'
-    : store.bangumi?.cn || store.bangumi?.title || store.bangumi?.city || '巡礼地图'
+  store.activePanel === 'history'
+    ? '旅途档案地图'
+    : activePlan.value ||
+        (store.activePanel === 'library' && store.coordinateLibrary.length)
+      ? '我的巡礼地图'
+      : store.bangumi?.cn || store.bangumi?.title || store.bangumi?.city || '巡礼地图'
 )
 const planOrder = computed(() => {
   const order = new Map()
@@ -422,11 +426,11 @@ function fitBoundsToPoints() {
   })
 }
 function focusPoint() {
-  if (!map) return
+  if (!map) return false
   const point = mapPoints.value.find(
     (point) => point.id === store.selectedPointId
   )
-  if (!point || !hasGeo(point)) return
+  if (!point || !hasGeo(point)) return false
   map.stop()
   map.closePopup()
   map.setView(point.geo, 16, { animate: false })
@@ -434,6 +438,7 @@ function focusPoint() {
     markerMap.get(item.id)?.setIcon(createMarker(item, index))
   )
   markerMap.get(point.id)?.openPopup()
+  return true
 }
 function switchTile(key) {
   if (activeTile.value === key || !map) return
@@ -563,7 +568,7 @@ onMounted(async () => {
       )
       map.invalidateSize({ pan: false })
       if (wasHidden) {
-        fitBoundsToPoints()
+        if (!focusPoint()) fitBoundsToPoints()
         wasHidden = false
       }
       markerMap.forEach((marker) => {

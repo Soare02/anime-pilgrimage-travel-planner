@@ -131,13 +131,27 @@
         </main>
       </div>
     </div>
-    <RagAdminPanel v-if="store.showAdminPage" />
+    <section
+      v-if="store.showAdminPage && !adminPanel"
+      class="admin-load-panel"
+      aria-label="数据中心加载"
+    >
+      <h1>巡礼数据中心</h1>
+      <p :role="adminLoadError ? 'alert' : 'status'">
+        {{ adminLoadError ? '数据中心页面加载失败，请重试。' : '正在加载数据中心…' }}
+      </p>
+      <div class="admin-load-actions">
+        <button v-if="adminLoadError" class="primary-button" @click="loadAdminPanel">重试</button>
+        <button class="glass-action-btn" @click="store.showAdminPage = false">返回巡礼地图</button>
+      </div>
+    </section>
+    <component :is="adminPanel" v-if="store.showAdminPage && adminPanel" />
     <AiSettingsDialog />
   </div>
 </template>
 
 <script setup>
-import { defineAsyncComponent, ref } from 'vue'
+import { ref, shallowRef, watch } from 'vue'
 import SearchPanel from './components/SearchPanel.vue'
 import CoordinateLibrary from './components/CoordinateLibrary.vue'
 import MapView from './components/MapView.vue'
@@ -146,10 +160,37 @@ import AppIcon from './components/AppIcon.vue'
 import AiSettingsDialog from './components/AiSettingsDialog.vue'
 import { useAppStore } from './stores/app'
 
-const RagAdminPanel = defineAsyncComponent(
-  () => import('./components/RagAdminPanel.vue')
-)
 const store = useAppStore()
+const adminPanel = shallowRef(null)
+const adminLoadError = ref(false)
+let adminLoading = false
+
+async function loadAdminPanel() {
+  if (adminPanel.value || adminLoading) return
+  adminLoading = true
+  adminLoadError.value = false
+  let timeout
+  try {
+    const module = await Promise.race([
+      import('./components/RagAdminPanel.vue'),
+      new Promise((_, reject) => {
+        timeout = setTimeout(() => reject(new Error('数据中心加载超时')), 20000)
+      })
+    ])
+    adminPanel.value = module.default
+  } catch (error) {
+    adminLoadError.value = true
+    console.error('数据中心页面加载失败:', error)
+  } finally {
+    clearTimeout(timeout)
+    adminLoading = false
+  }
+}
+
+watch(() => store.showAdminPage, (show) => {
+  if (show) loadAdminPanel()
+}, { immediate: true })
+
 const mobileMapVisible = ref(false)
 const navigation = [
   { key: 'explore', label: '发现圣地', icon: 'compass' },
@@ -164,6 +205,33 @@ function navigate(panel) {
 </script>
 
 <style>
+.admin-load-panel {
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 20px;
+  padding: 24px;
+  color: var(--text-color);
+  text-align: center;
+}
+
+.admin-load-panel h1 {
+  font-size: 22px;
+}
+
+.admin-load-panel p {
+  color: var(--text-secondary);
+}
+
+.admin-load-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 12px;
+}
+
 :root {
   color-scheme: light;
   --bg-color: #eef2f6 !important;

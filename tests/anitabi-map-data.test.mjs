@@ -188,7 +188,9 @@ test('现有搜索与收藏流程直接使用官网坐标，API 请求全部经�
   globalThis.localStorage = { getItem: () => null, setItem() {} }
   let vite
   try {
-    vite = await createServer({ configFile: false, server: { middlewareMode: true, hmr: false },
+    vite = await createServer({ configFile: false,
+      cacheDir: `verification_artifacts/vite-map-tests-${process.pid}`,
+      server: { middlewareMode: true, hmr: false },
       appType: 'custom', optimizeDeps: { noDiscovery: true } })
     const { useAppStore } = await vite.ssrLoadModule('/src/stores/app.js')
     setActivePinia(createPinia())

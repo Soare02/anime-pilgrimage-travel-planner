@@ -8,7 +8,7 @@
       <div class="dock-title">
         <AppIcon name="camera" :size="16" />
         <h2>
-          {{ store.activePanel === 'library' ? '收藏地标' : '场景地标' }}
+          {{ store.activePanel === 'history' ? '档案地标' : store.activePanel === 'library' ? '收藏地标' : '场景地标' }}
         </h2>
         <span class="dock-count">{{ displayPoints.length }}</span>
       </div>
@@ -106,9 +106,11 @@ const scrollRef = ref(null)
 const canScrollLeft = ref(false)
 const canScrollRight = ref(false)
 const displayPoints = computed(() =>
-  store.activePanel === 'library' && store.coordinateLibrary.length
-    ? store.coordinateLibrary
-    : store.points
+  store.activePanel === 'history'
+    ? store.historyLandmarks
+    : store.activePanel === 'library' && store.coordinateLibrary.length
+      ? store.coordinateLibrary
+      : store.points
 )
 let resizeObserver
 const scrollBehavior = () =>
