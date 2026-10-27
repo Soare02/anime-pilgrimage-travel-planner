@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import math
 import os
+import re
+from datetime import date as CalendarDate
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, field_validator, model_validator
@@ -42,6 +44,36 @@ class Landmark(BaseModel):
     s: int | float | None = None
     image: str | None = None
 
+    @field_validator("s", mode="before")
+    @classmethod
+    def normalize_scene_time(cls, value: Any) -> int | float | None:
+        # Anitabi also returns empty strings, timecodes and manga page labels.
+        # Scene time is optional metadata and must not invalidate a location.
+        if value is None:
+            return None
+        if isinstance(value, str):
+            text = value.strip().replace("：", ":")
+            if not text:
+                return None
+            if re.fullmatch(r"\d+(?:\.\d+)?", text):
+                value = float(text)
+            else:
+                timecode = re.fullmatch(r"(?:(\d+):)?(\d+):(\d+(?:\.\d+)?)", text)
+                units = re.fullmatch(
+                    r"(?:(\d+)(?:小时|时|h))?(?:(\d+)(?:分钟|分|min|m))?(?:(\d+(?:\.\d+)?)(?:秒|s)?)?",
+                    text, re.IGNORECASE,
+                )
+                match = timecode or units
+                if not match:
+                    return None  # Page numbers and free text are not timestamps.
+                hours, minutes, seconds = (float(part or 0) for part in match.groups())
+                if timecode and (seconds >= 60 or (match.group(1) is not None and minutes >= 60)):
+                    return None
+                value = hours * 3600 + minutes * 60 + seconds
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+            raise ValueError("场景时间必须是非负秒数或时间文本")
+        return value
+
     @field_validator("id")
     @classmethod
     def valid_id(cls, value: PointId) -> PointId:
@@ -74,6 +106,18 @@ class Landmark(BaseModel):
 class PlanRequest(BaseModel):
     days: StrictInt = Field(gt=0, le=MAX_DAYS)
     landmarks: list[Landmark] = Field(min_length=1, max_length=MAX_LANDMARKS)
+    start_date: CalendarDate | None = None
+
+    @field_validator("start_date", mode="before")
+    @classmethod
+    def valid_start_date(cls, value: Any) -> CalendarDate | None:
+        if value is None or value == "":
+            return None
+        if isinstance(value, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+            return CalendarDate.fromisoformat(value)
+        if type(value) is CalendarDate:
+            return value
+        raise ValueError("出发日期必须是 YYYY-MM-DD 格式的有效日期")
 
     @model_validator(mode="after")
     def unique_ids(self) -> "PlanRequest":
@@ -111,6 +155,50 @@ class PlanDay(BaseModel):
     point_ids: list[PointId] = Field(default_factory=list)
     legs: list[PlanLeg] = Field(default_factory=list)
     straight_line_distance_m: float = Field(default=0, ge=0)
+    date: CalendarDate | None = None
+    planning_reason: str = ""
+    weather_advice: str = ""
+
+
+VisitTime = Literal["any", "morning", "afternoon", "sunset", "evening"]
+VISIT_TIME_LABELS = {"any": "时段不限", "morning": "上午", "afternoon": "下午", "sunset": "黄昏", "evening": "夜间"}
+
+
+class ScenePreference(BaseModel):
+    point_id: PointId
+    preferred_time: VisitTime = "any"
+    scene_order: StrictInt | None = Field(default=None, gt=0)
+    scene_summary: str = Field(default="", max_length=800)
+    reason: str = Field(default="", max_length=600)
+    weather_sensitivity: Literal["outdoor", "indoor", "unknown"] = "unknown"
+
+
+class WeatherHour(BaseModel):
+    time: str = Field(pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+    summary: str
+    temp_c: float | None = Field(default=None, allow_inf_nan=False)
+    rain_chance_percent: int | None = Field(default=None, ge=0, le=100)
+
+
+class WeatherForecast(BaseModel):
+    date: CalendarDate
+    summary: str
+    min_temp_c: float | None = Field(default=None, allow_inf_nan=False)
+    max_temp_c: float | None = Field(default=None, allow_inf_nan=False)
+    rain_chance_percent: int | None = Field(default=None, ge=0, le=100)
+    hourly: list[WeatherHour] = Field(default_factory=list)
+    sunrise: str | None = Field(default=None, pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+    sunset: str | None = Field(default=None, pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+
+
+class WeatherSnapshot(BaseModel):
+    location: str
+    geo: list[float]
+    point_ids: list[PointId] = Field(default_factory=list)
+    retrieved_at: str
+    current_summary: str = ""
+    forecast: list[WeatherForecast] = Field(default_factory=list)
+    source_url: str
 
 
 class PointNote(BaseModel):
@@ -118,6 +206,8 @@ class PointNote(BaseModel):
     scene_description: str = ""
     photo_advice: str = ""
     cautions: str = ""
+    scene_atmosphere: str = ""
+    pose_suggestions: str = ""
     source_ids: list[str] = Field(default_factory=list)
     inferred: bool = False
     insufficient_data: bool = False
@@ -141,5 +231,7 @@ class Plan(BaseModel):
     days: list[PlanDay]
     point_notes: list[PointNote] = Field(default_factory=list)
     sources: list[PlanSource] = Field(default_factory=list)
+    weather: list[WeatherSnapshot] = Field(default_factory=list)
+    scene_preferences: list[ScenePreference] = Field(default_factory=list)
     unassigned_point_ids: list[PointId] = Field(default_factory=list)
     validation: PlanValidation

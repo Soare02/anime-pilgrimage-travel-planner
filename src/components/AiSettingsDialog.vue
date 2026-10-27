@@ -40,7 +40,7 @@
       </template>
       <p v-else class="settings-note">
         智能体会检索目的地信息、天气与交通。使用前请启动本地 Python 服务，并在
-        .env 中配置模型与搜索密钥。
+        .env 中配置 AGENT_MODEL 模型名称与相关密钥。
       </p>
     </el-form>
     <template #footer>

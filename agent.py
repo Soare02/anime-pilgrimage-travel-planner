@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 # Initialize DeepSeek Chat Model
 llm_deepseek = init_chat_model(
-    model="deepseek-v4-flash",
+    model=os.getenv("AGENT_MODEL", "").strip() or "deepseek-v4-flash",
     base_url="https://api.deepseek.com",
     temperature=0.8,
     api_key=os.getenv("DEEPSEEK_API_KEY"),
@@ -417,7 +417,7 @@ def traced_llm_invoke(node: str, label: str, prompt: str) -> str:
     """统一封装 llm_deepseek.invoke，自动把输入/输出写入 agent_trace。"""
     response = llm_deepseek.invoke(prompt)
     content = response.content if hasattr(response, "content") else str(response)
-    agent_trace.record_llm_call(node=node, label=label, prompt=prompt, response=content)
+    agent_trace.record_llm_call(node=node, label=label, prompt=prompt, response=content, model=llm_deepseek.model_name)
     return content
 
 
@@ -883,6 +883,7 @@ def supervisor_editor_node(state: AgentState, config=None) -> Dict[str, Any]:
         label="EDITOR_FORMATTING (最终 Markdown，流式)",
         prompt=fmt_prompt,
         response=content,
+        model=llm_deepseek.model_name,
     )
     agent_trace.record_node_end("supervisor_editor", f"已生成最终 Markdown ({len(content)} 字符)")
 

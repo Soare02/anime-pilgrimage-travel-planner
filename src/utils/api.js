@@ -62,7 +62,12 @@ async function responseError(response, serviceName) {
   try { data = JSON.parse(body) } catch { data = null }
   const detail = data?.detail
   const firstDetail = Array.isArray(detail) ? detail[0] : detail
-  const message = data?.message || (typeof detail === 'string' ? detail : firstDetail?.message || firstDetail?.msg) || body.trim()
+  const fieldMessages = response.status === 422 && Array.isArray(data?.fields)
+    ? [...new Set(data.fields.map(field => field.message).filter(message => typeof message === 'string' && message.trim()))]
+    : []
+  const message = fieldMessages.length
+    ? fieldMessages.slice(0, 3).join('；')
+    : data?.message || (typeof detail === 'string' ? detail : firstDetail?.message || firstDetail?.msg) || body.trim()
   const code = data?.code || firstDetail?.code || (response.status === 422 ? 'INVALID_INPUT' : 'HTTP_ERROR')
   return new AgentRouteError(`${serviceName}返回错误 (${response.status})：${message || response.statusText}`, code, data)
 }
@@ -199,7 +204,7 @@ async function readLegacyAgentText(response, onChunk) {
 
 export async function generateAIRoute(days, landmarks, aiConfig, onChunk, options = {}) {
   const { url, apiKey, model } = aiConfig
-  const { scheme, signal, onEvent } = options
+  const { scheme, signal, onEvent, startDate } = options
 
   if (scheme === 'agent') {
     try {
@@ -207,7 +212,7 @@ export async function generateAIRoute(days, landmarks, aiConfig, onChunk, option
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream, text/plain' },
         signal,
-        body: JSON.stringify({ days, landmarks })
+        body: JSON.stringify({ days, landmarks, ...(startDate ? { start_date: startDate } : {}) })
       })
       if (!response.ok) throw await responseError(response, '智能体服务')
       if (response.headers.get('content-type')?.toLowerCase().includes('text/event-stream')) {

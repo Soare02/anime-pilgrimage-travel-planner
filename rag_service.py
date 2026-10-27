@@ -17,12 +17,16 @@ from langchain_core.documents import Document
 from langchain_community.vectorstores import Chroma
 from openai import OpenAI
 from tavily import TavilyClient
+import tools as scene_tools
+import planning_progress as progress
+from search_runtime import run_search_tasks
 from tavily_config import (
     get_tavily_include_domains,
     get_tavily_search_kwargs,
     parse_int_env,
     ANIME_SCENE_SITE_QUERIES,
     ANIME_SCENE_TRAVEL_KEYWORDS,
+    domain_matches,
 )
 
 load_dotenv()
@@ -76,6 +80,28 @@ def _trace_rag_failure(stage: str, exc: BaseException) -> None:
     try:
         import agent_trace
         agent_trace.record_exception(stage, exc, code=_failure_code(exc))
+    except Exception:
+        pass
+
+
+def _trace_search_route(provider: str, landmark: str, **details) -> None:
+    logger.info("RAG-Service: [%s] 搜索线路 %s: %s", landmark, provider, details)
+    label = {"tavily": "Tavily", "baidu": "百度", "bing": "Bing", "ddg": "DuckDuckGo"}.get(provider, provider)
+    key = f"search:{provider}:{landmark}"
+    if details.get("skipped"):
+        progress.activity("retrieve", key, f"{label} · {landmark}", "搜索服务未配置，本次跳过", "skipped")
+    elif "trigger" in details:
+        summary = "核心资料不足，正在做站点定向补充" if details["trigger"] == "site_supplement" else "正在检索公开资料"
+        progress.activity("retrieve", key, f"{label} · {landmark}", summary, "running")
+    else:
+        added = details.get("new_sources", 0)
+        summary = f"新增 {added} 条有效来源，累计 {details.get('total_sources', 0)} 条"
+        if details.get("enough"):
+            summary += "；资料已足够，跳过后续备用线路"
+        progress.activity("retrieve", key, f"{label} · {landmark}", summary, "completed" if added else "warning")
+    try:
+        import agent_trace
+        agent_trace.record_event("retrieve", f"联网检索：{provider}", {"provider": provider, "landmark": landmark, **details})
     except Exception:
         pass
 
@@ -292,7 +318,7 @@ class RAGService:
             timeout=max(1, int(_positive_float_env("TAVILY_TIMEOUT_SECONDS", 10.0))),
         ) if tavily_key else None
         if not self.tavily_client:
-            logger.warning("RAG-Service: 未配置 TAVILY_API_KEY，联网预检索功能将无法正常抓取网页。")
+            logger.warning("RAG-Service: 未配置 TAVILY_API_KEY，联网预检索将尝试直接搜索兜底。")
 
     def _embedding_binding_verified(self) -> bool:
         metadata = getattr(self.db._collection, "metadata", None) or {}
@@ -840,6 +866,7 @@ class RAGService:
         original_name: str = "",
         bangumi_original_name: str = "",
         should_cancel: Optional[Callable[[], bool]] = None,
+        deadline: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
         联网搜索单个地标的长效攻略、圣地巡礼剧情以及交通状况，自动规避天气等易变词汇。
@@ -848,8 +875,10 @@ class RAGService:
         is_cancelled = lambda: bool(should_cancel and should_cancel())
         if is_cancelled():
             return {"text": "", "pages": [], "failures": [{"code": "RUN_CANCELLED", "message": "检索已取消"}]}
-        if not self.tavily_client:
-            return {"text": "", "pages": [], "failures": [{"code": "TOOL_UNCONFIGURED", "message": "TAVILY_API_KEY 未配置"}]}
+        web_deadline = min(deadline if deadline is not None else float("inf"), time.monotonic() + _positive_float_env("RAG_WEB_TIMEOUT_SECONDS", 30))
+        tavily_deadline = min(web_deadline, time.monotonic() + _positive_float_env("RAG_TAVILY_PHASE_TIMEOUT_SECONDS", 12))
+        stopped = lambda: is_cancelled() or time.monotonic() >= web_deadline
+        tavily_stopped = lambda: is_cancelled() or time.monotonic() >= tavily_deadline
         
         # 严格限制在“长效背景知识”领域，规避瞬时信息；核心 query 先跑，站点 query 仅在召回不足时补充。
         core_queries = []
@@ -909,11 +938,12 @@ class RAGService:
         queries = core_queries[:core_limit]
 
         search_failures = []
+        routes = []
 
         def search_with_retry(query: str) -> Dict[str, Any]:
             attempts = min(parse_int_env("TAVILY_MAX_RETRIES", 1, min_value=0), 2) + 1
             for attempt in range(attempts):
-                if is_cancelled():
+                if tavily_stopped():
                     return {}
                 try:
                     return self.tavily_client.search(
@@ -932,41 +962,49 @@ class RAGService:
             return {}
 
         def run_tavily_queries(query_batch: List[Tuple[str, str]]) -> List[Tuple[str, Dict[str, Any]]]:
-            if not query_batch or is_cancelled():
+            if not query_batch or tavily_stopped():
                 return []
 
             responses = []
-            with ThreadPoolExecutor(max_workers=min(len(query_batch), 3)) as executor:
-                future_to_label = {}
-                for label, query in query_batch:
-                    if is_cancelled():
-                        break
-                    future_to_label[executor.submit(search_with_retry, query)] = label
-                for future in as_completed(future_to_label):
-                    label = future_to_label[future]
-                    try:
-                        responses.append((label, future.result()))
-                    except Exception as e:
-                        logger.warning(f"RAG-Service: {label}检索失败 [{name}]: {e}")
-                        search_failures.append({"code": _failure_code(e), "message": str(e), "stage": label})
-                        _trace_rag_failure("rag_web_search", e)
+            tasks = [(label, search_with_retry, (query,)) for label, query in query_batch]
+            completed = 0
+            for label, response, error in run_search_tasks(tasks, tavily_stopped):
+                completed += 1
+                if error is None and (not isinstance(response, dict) or not isinstance(response.get("results"), list)):
+                    error = ValueError("Tavily 未返回有效的 results 数组")
+                if error:
+                    logger.warning(f"RAG-Service: {label}检索失败 [{name}]: {error}")
+                    search_failures.append({"code": _failure_code(error), "message": str(error), "stage": f"tavily/{label}"})
+                    _trace_rag_failure("rag_web_search", error)
+                else:
+                    responses.append((f"Tavily/{label}", response))
+            if completed < len(tasks) and not is_cancelled():
+                search_failures.append({"code": "TOOL_TIMEOUT", "message": "Tavily 阶段时间预算已到，尝试备用搜索", "stage": "tavily"})
             return responses
 
         contents = []
         pages = []
         seen_urls = set()
+        domain_policy = get_tavily_search_kwargs()
 
         def append_useful_results(responses: List[Tuple[str, Dict[str, Any]]]) -> None:
             for label, response in responses:
                 for item in response.get("results", []):
-                    title = item.get("title", "")
-                    url = item.get("url", "")
+                    if not isinstance(item, dict):
+                        continue
+                    title = str(item.get("title") or "")
+                    url = scene_tools.normalize_search_url(item.get("url", ""))
                     content = result_content_with_raw(item)
 
-                    if url and url in seen_urls:
+                    if not url or not content.strip() or url in seen_urls:
                         continue
-                    if url:
-                        seen_urls.add(url)
+                    domain = (urlparse(url).hostname or "").lower()
+                    allowed = domain_policy.get("include_domains", [])
+                    denied = domain_policy.get("exclude_domains", [])
+                    if allowed and not any(domain_matches(domain, value) for value in allowed):
+                        continue
+                    if any(domain_matches(domain, value) for value in denied):
+                        continue
 
                     # 1. 过滤明显的文件/代码提交页面噪声（如 Hugging Face, GitHub Commits/Diffs 等）
                     url_lower = url.lower()
@@ -1031,6 +1069,7 @@ class RAGService:
                         continue
 
                     clean_url = url if _is_http_url(url) else ""
+                    seen_urls.add(url)
                     pages.append({"title": title, "url": clean_url, "content": content, "retrieved_at": _retrieved_at()})
                     contents.append(f"【{label}来源网页: {title} ({clean_url or '来源缺失'})】\n{content}\n")
 
@@ -1042,21 +1081,73 @@ class RAGService:
                 " | ".join([f"{label}: {query}" for label, query in queries]),
                 ", ".join(include_domains) if include_domains else "未限制",
             )
-            append_useful_results(run_tavily_queries(queries))
+            responses = []
+            if self.tavily_client and not tavily_stopped():
+                routes.append("tavily")
+                _trace_search_route("tavily", name, trigger="primary")
+                responses = run_tavily_queries(queries)
+                append_useful_results(responses)
+            elif not self.tavily_client:
+                search_failures.append({"code": "TOOL_UNCONFIGURED", "message": "TAVILY_API_KEY 未配置，尝试直接搜索兜底", "stage": "tavily"})
+                _trace_search_route("tavily", name, skipped=True)
 
-            if not is_cancelled() and len(contents) < min_results and site_queries:
-                fallback_queries = site_queries[:site_limit]
+            if responses and not tavily_stopped() and len(contents) < min_results and site_queries:
+                fallback_queries = site_queries[:min(site_limit, max(0, max_queries - len(queries)))]
                 logger.info(
                     "RAG-Service: 地标 [%s] 核心检索仅命中 %s 条，追加站点定向检索: %s",
                     name,
                     len(contents),
                     " | ".join([f"{label}: {query}" for label, query in fallback_queries]),
                 )
+                _trace_search_route("tavily", name, trigger="site_supplement", existing_sources=len(pages))
                 append_useful_results(run_tavily_queries(fallback_queries))
+
+            if "tavily" in routes:
+                _trace_search_route("tavily", name, new_sources=len(pages), total_sources=len(pages), enough=len(pages) >= min_results)
+
+            direct_enabled = os.getenv("RAG_ENABLE_DIRECT_FALLBACK", "1").strip().lower() not in {"0", "false", "no", "off"}
+            if direct_enabled and len(pages) < min_results and not stopped():
+                engine_names = list(dict.fromkeys(
+                    value.strip().lower() for value in os.getenv("RAG_DIRECT_SEARCH_ENGINES", "baidu,bing,ddg").split(",")
+                    if value.strip().lower() in {"baidu", "bing", "ddg"}
+                )) or ["baidu", "bing", "ddg"]
+                # Reserve a Japanese query when real Japanese aliases are available.
+                pool = core_queries[:1] + [entry for entry in core_queries if entry[0] == "日文"] + core_queries[1:]
+                direct_queries = dedupe_queries(pool)[:parse_int_env("RAG_DIRECT_MAX_QUERIES", 2, max_value=4)]
+                terms = list(dict.fromkeys(filter(None, [name, original_name, bangumi, bangumi_original_name])))
+                for index, engine in enumerate(engine_names):
+                    if stopped() or len(pages) >= min_results:
+                        break
+                    routes.append(engine)
+                    trigger = "supplement" if pages else "fallback"
+                    _trace_search_route(engine, name, trigger=trigger, existing_sources=len(pages))
+                    # Leave a share of the remaining budget for each later engine.
+                    remaining = web_deadline - time.monotonic()
+                    engine_deadline = time.monotonic() + remaining / (len(engine_names) - index)
+                    engine_stopped = lambda stop_at=engine_deadline: stopped() or time.monotonic() >= stop_at
+                    before = len(pages)
+                    try:
+                        results, query_errors = scene_tools.search_scene_pages(
+                            direct_queries, terms, engine, should_cancel=engine_stopped,
+                            exclude_urls=set(seen_urls),
+                            max_pages=parse_int_env("RAG_DIRECT_MAX_PAGES", 2, max_value=5),
+                        )
+                        append_useful_results([(engine, {"results": results})])
+                        for label, message in query_errors:
+                            code = next((code for code in ("TOOL_TIMEOUT", "TOOL_UNAVAILABLE") if code in str(message)), "TOOL_ERROR")
+                            search_failures.append({"code": code, "message": str(message), "stage": f"{engine}/{label}"})
+                        if engine_stopped() and not is_cancelled():
+                            search_failures.append({"code": "TOOL_TIMEOUT", "message": f"{engine} 搜索时间预算已到", "stage": engine})
+                    except Exception as exc:
+                        search_failures.append({"code": _failure_code(exc), "message": str(exc), "stage": engine})
+                        _trace_rag_failure(f"rag_web_search/{engine}", exc)
+                    _trace_search_route(engine, name, new_sources=len(pages) - before, total_sources=len(pages), enough=len(pages) >= min_results)
 
             if is_cancelled():
                 return {"text": "", "pages": [], "failures": search_failures + [{"code": "RUN_CANCELLED", "message": "检索已取消"}]}
-            return {"text": "\n".join(contents), "pages": pages, "failures": search_failures}
+            if time.monotonic() >= web_deadline:
+                search_failures.append({"code": "TOOL_TIMEOUT", "message": "联网检索总时间预算已到，保留已取得的资料", "stage": "web_search"})
+            return {"text": "\n".join(contents), "pages": pages, "failures": search_failures, "routes": routes}
         except Exception as e:
             logger.error(f"RAG-Service: 地标 [{name}] 检索失败，细节: {e}")
             return {"text": "", "pages": [], "failures": search_failures + [{"code": "TOOL_ERROR", "message": str(e)}]}
@@ -1064,12 +1155,15 @@ class RAGService:
     def ingest_landmarks(
         self, landmarks: List[Dict[str, Any]],
         should_cancel: Optional[Callable[[], bool]] = None,
+        deadline: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
         并发检索缺失的地标信息，递归切片并暂存至待审核队列（不直接写入 ChromaDB）。
         返回暂存状态信息和本次新检索文本，供前端展示审核提示，并供当前生成链路临时使用。
         """
         is_cancelled = lambda: bool(should_cancel and should_cancel())
+        web_deadline = min(deadline if deadline is not None else float("inf"), time.monotonic() + _positive_float_env("RAG_WEB_TIMEOUT_SECONDS", 30))
+        stopped = lambda: is_cancelled() or time.monotonic() >= web_deadline
         empty_result = {"pending_count": 0, "pending_landmarks": [], "search_context": "", "sources": [], "landmark_context": {}}
         if is_cancelled():
             return {**empty_result, "failures": [{"code": "RUN_CANCELLED", "message": "联网补充已取消"}], "status": "cancelled"}
@@ -1109,44 +1203,35 @@ class RAGService:
             agent_trace = None
             run_id = None
 
-        def search_with_trace(name, bangumi, original_name, bangumi_original_name):
+        def search_with_trace(name, bangumi, original_name, bangumi_original_name, point_id):
             if agent_trace and run_id:
                 agent_trace.attach_run(run_id)
             if is_cancelled():
                 return {"text": "", "pages": [], "failures": [{"code": "RUN_CANCELLED", "message": "检索已取消"}]}
-            return self._search_single_landmark(name, bangumi, original_name, bangumi_original_name, should_cancel)
+            # Leave a little time to collect the terminal partial result before the batch deadline.
+            with progress.point_scope(point_id):
+                return self._search_single_landmark(name, bangumi, original_name, bangumi_original_name, should_cancel, web_deadline - 0.2)
 
         ingest_workers = parse_int_env("RAG_INGEST_MAX_WORKERS", 3)
-        with ThreadPoolExecutor(max_workers=min(len(to_search), ingest_workers)) as executor:
-            future_to_lm = {}
-            for lm_id, name, bangumi, original_name, bangumi_original_name in to_search:
-                if is_cancelled():
-                    break
-                future = executor.submit(
-                    search_with_trace,
-                    name,
-                    bangumi,
-                    original_name,
-                    bangumi_original_name
-                )
-                future_to_lm[future] = (lm_id, name, bangumi)
-            
-            for future in as_completed(future_to_lm):
-                lm_id, name, bangumi = future_to_lm[future]
-                try:
-                    search_result = future.result()
-                    if isinstance(search_result, str):
-                        raw_text = search_result
-                        pages = []
-                    else:
-                        raw_text = search_result.get("text", "")
-                        pages = search_result.get("pages", [])
-                        failures.extend({**item, "landmark_id": lm_id} for item in search_result.get("failures", []))
-                    if raw_text.strip():
-                        results_to_stage.append((lm_id, name, bangumi, raw_text, pages))
-                except Exception as exc:
-                    logger.error(f"RAG-Service: 并发检索地标 [{name}] 线程跑飞: {exc}")
-                    failures.append({"landmark_id": lm_id, "code": "TOOL_ERROR", "message": str(exc)})
+        tasks = [
+            ((lm_id, name, bangumi), search_with_trace, (name, bangumi, original_name, bangumi_original_name, lm_id))
+            for lm_id, name, bangumi, original_name, bangumi_original_name in to_search
+        ]
+        for (lm_id, name, bangumi), search_result, error in run_search_tasks(tasks, stopped, max_workers=ingest_workers):
+            if error:
+                logger.error(f"RAG-Service: 并发检索地标 [{name}] 线程跑飞: {error}")
+                failures.append({"landmark_id": lm_id, "code": _failure_code(error), "message": str(error)})
+                continue
+            if isinstance(search_result, str):
+                raw_text, pages = search_result, []
+            else:
+                raw_text = search_result.get("text", "")
+                pages = search_result.get("pages", [])
+                failures.extend({**item, "landmark_id": lm_id} for item in search_result.get("failures", []))
+            if raw_text.strip():
+                results_to_stage.append((lm_id, name, bangumi, raw_text, pages))
+        if time.monotonic() >= web_deadline and not is_cancelled():
+            failures.append({"code": "TOOL_TIMEOUT", "message": "批量联网检索时间预算已到，保留已完成的资料"})
 
         # 3. 递归切片并暂存至待审核队列（不直接写入 ChromaDB）
         if not results_to_stage:
@@ -1205,6 +1290,8 @@ class RAGService:
                 chunk_metadata=chunk_metadata,
                 source_records=source_records,
             )
+            progress.activity("retrieve", f"sources:{lm_id}", f"整理来源 · {name}",
+                              f"已保留 {len(source_records)} 条参考来源，新增资料已标记为待审核")
             pending_landmarks.append({"id": lm_id, "name": name, "chunks_count": len(chunks)})
             staged_context_blocks.append(f"### {name} / {bangumi or '未知'}\n{text}")
             all_source_records.extend(source_records)

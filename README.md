@@ -19,8 +19,9 @@
 - **我的巡礼** — 跨作品收藏地标，勾选本次行程地点并设置 1–7 天，支持批量收藏与移除。
 - **三种 AI 方案** — 云端服务、本地模型与 Python Agent。云端和本地模式生成 Markdown；Agent v2 生成可校验的结构化 Plan。
 - **结构化行程** — Agent 的地图连线、逐日点位、文字说明和历史记录共用一份 Plan；支持进度提示、取消、来源展示与失败草案。
-- **RAG 与截图分析** — 已有知识召回、Tavily 联网补充、人工审核入库；可选 MiMo 提供截图观察和拍照建议。
-- **旅途档案与数据中心** — 回看历史行程，点击档案地标定位地图；管理待审核切片、已入库地标、运行日志、召回测试与 Agent 调用追踪。
+- **RAG 与截图分析** — 已有知识召回、Tavily 联网补充；资料不足或服务失败时依次用百度、Bing、DuckDuckGo 搜索兜底，人工审核入库；可选 MiMo 提供截图观察和拍照建议。
+- **旅途档案** — 回看历史行程，点击档案地标定位地图。
+- **独立管理后台** — `/admin/` 登录后管理待审核切片、已入库地标、运行日志、召回测试与 Agent 调用追踪；所有管理读写接口统一校验会话。
 - **响应式界面** — 浅色毛玻璃工作台，移动端支持侧栏内容与地图切换。
 
 AI 设置与路线历史保存到当前浏览器的 `localStorage`；**当前收藏库只保存在页面内存，刷新后会清空**。Agent 新版历史自带地标快照，可恢复行程点位、顺序和说明；在线底图与远程图片仍需网络。
@@ -29,16 +30,22 @@ AI 设置与路线历史保存到当前浏览器的 `localStorage`；**当前收
 
 Python Agent 默认请求 `POST /api/v2/agent/plan`，提交所选地标的原始 ID、`[纬度, 经度]` 坐标与元数据，以及正整数天数。后端用 SSE 返回运行进度、完整 Plan 或草案、错误码和终态。输入错误在调用模型前返回 HTTP 422、`INVALID_INPUT` 和字段错误。后端默认最多接受 50 个地标、30 天；当前界面的天数选择为 1–7 天。旧 `/api/agent/plan` 保留为纯文本流兼容接口，已有旧默认地址会自动迁移到 v2。
 
-规划流程为 `资料检索 → 分天排线 → 程序校验与内容审核 → 场景说明`，校验失败时默认最多修复 3 次。Plan 保存输入快照、逐日点位 ID 顺序、相邻点位直线距离、说明、来源、未安排点与校验结果。Python 通过最近邻和有界 2-opt 整理每日顺序，并生成与 Plan 一致的文字。审核失败或修复预算耗尽时显示带具体问题的草案，草案不写入成功历史。旧版历史仍通过在线数据重新加载地标。
+Agent 规划时显示分阶段时间线：确认地点、检索资料、天气与原作场景、路线编排、校验与修复、巡礼指南。每个阶段保留状态、耗时和根据实际执行结果生成的小结，展开可查看知识库命中、搜索线路切换、截图和天气分析、校验问题及每次返工。补排记录归在「校验与修复」，不会覆盖初稿或上一次校验结果。取消、失败和事件流中断后仍保留已收到的记录，尚未执行的阶段不会标为完成。
 
-**距离仅指点位间直线距离。** 不含实际道路、出发地往返、步行时间、公交或铁路班次。当前页面没有出发日期输入，v2 不调用旧版实时天气工具。截图观察会标明未核实或推测内容，资料缺失和检索失败会显示提示。
+后端通过独立的 `step_update` SSE 事件发送这些简短记录，不传输模型原始提示词或完整调用日志，也不增加总结模型调用。成功行程的过程与输入快照一起保存到浏览器历史，可在「旅途档案 → 查看规划过程」回看；旧历史与不提供该事件的接口仍可使用。
+
+规划流程为 `资料检索 → 天气与原作情节分析 → 分天排线 → 程序校验与内容审核 → 场景说明`，校验失败时默认最多修复 3 次。Plan 保存输入快照、逐日点位 ID 顺序、相邻点位直线距离、场景时段偏好、天气快照、每日安排理由与天气建议，以及说明、来源、未安排点和校验结果。Python 通过最近邻和有界 2-opt 整理每日顺序，同时保留上午、下午、黄昏、夜间的先后，以及同一作品在相同时段内有依据的剧情顺序；地理位置、天气与剧情偏好的取舍由每日说明展示。审核失败或修复预算耗尽时显示带具体问题的草案，草案不写入成功历史。旧版历史仍通过在线数据重新加载地标。
+
+**距离仅指点位间直线距离。** 不含实际道路、出发地往返、步行时间、公交或铁路班次。Agent 模式可选填出发日期，天气按地标坐标分地区查询（相距较近的点位共用快照，单次最多查询 6 个地区），只将服务实际返回且日期匹配的预报用于晴雨安排。未设置日期或出行日期超出预报范围时，提供条件式建议，不把当前天气当成未来天气；天气失败会提示并继续规划。原作时段依据 RAG 与截图观察提取，片内时间戳不等于现实到访时间；资料不足时按地理位置安排。截图观察会标明未核实或推测内容，资料缺失和检索失败会显示提示。
+
+天气快照保留带当地时刻的分时预报，以及服务返回的日出、日落时刻，黄昏场景参考当天的实际日落时间。具体时段的晴雨判断必须有对应小时数据支持；每日展示的最高降雨概率是该日各预报小时概率的最大值。展开行程中的「天气参考与预报」可查看查询时间、来源和分时数据，历史行程保留生成时的天气快照。
 
 ---
 
 ## 使用流程与界面
 
 ```
-巡礼手帖   发现圣地 / 我的巡礼 / 旅途档案   数据中心 / AI 设置
+巡礼手帖   发现圣地 / 我的巡礼 / 旅途档案   AI 设置
 ┌──────────────────────┬─────────────────────────────┐
 │ 当前导航对应的工作台    │ Leaflet 地图                │
 │ · 作品搜索与取景地列表  │ · 点位、弹窗与照片对照       │
@@ -53,7 +60,7 @@ Python Agent 默认请求 `POST /api/v2/agent/plan`，提交所选地标的原�
 2. 在取景地列表、地图弹窗或底部卡片浏览并收藏地标；可以继续搜索其他作品。
 3. 打开「AI 设置」选择规划方式，按需填写接口、密钥和模型。
 4. 在「我的巡礼」勾选地点、选择天数并生成行程。Agent 模式需先启动 Python 后端。
-5. 在「旅途档案」回看已保存结果；需要审核知识或排查调用过程时打开「数据中心」。
+5. 在「旅途档案」回看已保存结果。管理员通过独立地址 `/admin/` 登录后审核知识或排查调用过程，主页面不再提供管理入口。
 
 ### 档案地标与地图定位
 
@@ -75,7 +82,7 @@ Python Agent 默认请求 `POST /api/v2/agent/plan`，提交所选地标的原�
 | 构建工具 | Vite 5 |
 | 后端框架 | FastAPI + Uvicorn |
 | AI 框架 | LangChain + LangGraph |
-| 大语言模型 | DeepSeek V4 Flash (文本推理) |
+| 大语言模型 | DeepSeek（模型名称由 `.env` 的 `AGENT_MODEL` 配置） |
 | 视觉模型 | MiMo v2.5 (动漫截图分析) |
 | 向量数据库 | ChromaDB |
 | Python 包管理 | uv |
@@ -91,7 +98,8 @@ Python Agent 默认请求 `POST /api/v2/agent/plan`，提交所选地标的原�
 | [Anitabi 官网地图数据](https://www.anitabi.cn/d/g.json) | 动漫取景地经纬度、截图、集数信息 | 总索引提供坐标，`gN.json` 分片提供详情，按地标 ID 合并 |
 | [Anitabi 作品数据](https://www.anitabi.cn/d/g.json) / [Bangumi](https://bgm.tv/) | 本地作品索引与在线补充搜索 | 名称未命中时通过 Anitabi 的 Bangumi 搜索服务查询 |
 | [Tavily Search](https://tavily.com/) | 巡礼攻略联网检索 (Agent 模式) | AI 搜索引擎 |
-| [wttr.in](https://wttr.in/) | 旧版 Agent 的实时天气工具 | 当前 v2 规划流程不调用 |
+| 百度 / Bing / DuckDuckGo | Tavily 失败或资料不足时补充巡礼网页 | 复用旧版 HTML 搜索与正文抓取，无需额外 API Key |
+| [wttr.in](https://wttr.in/) | Agent 实时天气与带日期预报 | v2 按坐标分地区查询，日期超出预报范围时仅作条件式建议 |
 | MiMo v2.5 | 动漫截图视觉分析 (Agent 模式) | 小米多模态视觉模型 |
 
 > **关于 Anitabi**：本项目依赖的地标数据来自 [anitabi.cn](https://anitabi.cn)，文档维护在 [anitabi/anitabi.cn-document](https://github.com/anitabi/anitabi.cn-document)。地标加载现已使用官网地图数据，替代实测缺少 `geo` 的公开 `/bangumi/{id}/lite` 与 `/points/detail` 响应。截图保留来源标注与来源链接。
@@ -193,23 +201,33 @@ npm run dev
 
 ### 3. 配置后端环境（可选）
 
-使用 Agent 或数据中心时，在项目根目录复制配置模板。已有 `.env` 时直接编辑，保留现有配置。
+使用 Agent 或数据中心时，在项目根目录创建本机配置。下面的命令只在 `.env` 不存在时复制模板：
 
 ```powershell
 # Windows PowerShell
-Copy-Item .env.example .env
+if (-not (Test-Path -LiteralPath .env)) { Copy-Item .env.example .env }
 ```
 
 ```bash
 # macOS / Linux
-cp .env.example .env
+[ -f .env ] || cp .env.example .env
 ```
 
-按需填写以下配置。`.env` 已被 Git 忽略，不应提交真实密钥。
+`.env.example` 是随代码发布的配置模板，`.env` 保存本机的真实配置，已被 Git 忽略。拉取更新后，对照模板补充缺失项，并保留已有密钥、模型名称、服务地址和搜索范围。修改后端配置后需重启 Python 服务；开发模式的 `--reload` 不保证重新读取 `.env`。真实 `.env`、管理员凭据和本地知识库不随代码上传 GitHub。
+
+按需填写以下配置。管理员账号、密码由部署者自行设置，没有默认登录凭据：
 
 ```env
-# Agent 文本模型所需；当前固定使用 deepseek-v4-flash
+# Agent 文本模型；在 .env 中修改模型名称后重启 Python 后端
 DEEPSEEK_API_KEY=your_deepseek_api_key
+AGENT_MODEL=deepseek-v4-flash
+
+# 独立管理后台；账号不能为空，密码至少 12 位
+ADMIN_USERNAME=
+ADMIN_PASSWORD=
+ADMIN_SESSION_TTL_SECONDS=28800
+# 本地 HTTP 为 0；生产 HTTPS 为 1
+ADMIN_COOKIE_SECURE=0
 
 # RAG 缺失资料联网补充所需
 TAVILY_API_KEY=your_tavily_api_key
@@ -232,7 +250,7 @@ EMBEDDING_TIMEOUT_SECONDS=5
 RERANK_BASE_URL=http://localhost:1234/v1
 ```
 
-模板中的 `VITE_ARK_API_KEY`、`VITE_ARK_MODEL` 当前未被前端源码读取；实际配置入口是网页「AI 设置」，其中密钥会随配置保存在当前浏览器。未配置 Tavily 或 MiMo 时，对应资料补充或截图分析不可用，Agent 会显示相关提示。
+模板中的 `VITE_ARK_API_KEY`、`VITE_ARK_MODEL` 当前未被前端源码读取；实际配置入口是网页「AI 设置」，其中密钥会随配置保存在当前浏览器。Tavily 未配置或调用失败时，默认尝试直接搜索兜底；MiMo 未配置时跳过截图分析，并保留相关提示。
 
 ### 4. 安装并启动 Python 后端
 
@@ -243,7 +261,17 @@ uv sync
 uv run uvicorn server:app --host 127.0.0.1 --port 8000 --reload
 ```
 
-后端 API 文档：`http://127.0.0.1:8000/docs`。回到「AI 设置」选择「智能体」，默认接口为 `/api/v2/agent/plan`。
+前后端启动后可访问：
+
+| 页面 | 默认地址 | 说明 |
+|------|----------|------|
+| 巡礼工作台 | `http://localhost:5173/` | 搜索、收藏与行程规划 |
+| 独立管理后台 | `http://localhost:5173/admin/` | 使用 `.env` 中的管理员账号、密码登录 |
+| 后端 API 文档 | `http://127.0.0.1:8000/docs` | 查看请求契约，管理接口仍需鉴权 |
+
+回到工作台「AI 设置」选择「智能体」，默认接口为 `/api/v2/agent/plan`。前端通过同源 `/api/` 代理连接后端；管理页面也使用这一代理。管理员未配置时管理接口返回 503；配置有效但未登录时返回 401。
+
+Agent 文本模型与 MiMo 视觉模型一样通过 `.env` 配置：修改 `AGENT_MODEL` 后重启 Python 后端即可生效，无需修改代码。未配置或留空时使用 `deepseek-v4-flash`。新旧 Agent 接口共用该模型配置，调用追踪会显示实际使用的模型名称。
 
 ### 5. 启用 RAG 向量检索与重排（可选）
 
@@ -280,9 +308,17 @@ uv run uvicorn server:app --host 127.0.0.1 --port 8000 --reload
 | `RAG_TAVILY_SITE_QUERIES` | `3` | 核心召回不足时的站点定向 fallback 数 |
 | `RAG_TAVILY_MIN_RESULTS` | `3` | 触发站点 fallback 的命中数阈值 |
 | `RAG_TAVILY_SEARCH_DEPTH` | `basic` | RAG 预检索 Tavily 深度（`basic`/`advanced`） |
+| `RAG_ENABLE_DIRECT_FALLBACK` | `1` | 新版 Tavily 不可用或有效来源不足时启用直接搜索，`0` 关闭 |
+| `RAG_DIRECT_SEARCH_ENGINES` | `baidu,bing,ddg` | 新版备用引擎及顺序，补够有效来源后停止 |
+| `RAG_DIRECT_MAX_QUERIES` | `2` | 每个备用引擎最多查询数，有日文原名时优先保留日文查询，上限 4 |
+| `RAG_DIRECT_MAX_PAGES` | `2` | 每个备用引擎最多抓取正文的页面数，上限 5 |
+| `RAG_WEB_TIMEOUT_SECONDS` | `30` | 批量联网检索总预算，受 Agent 工具与整次规划时限进一步约束 |
+| `RAG_TAVILY_PHASE_TIMEOUT_SECONDS` | `12` | Tavily 核心与站点查询共用的阶段预算，为备用引擎预留时间 |
 | `RAG_INGEST_MAX_WORKERS` | `3` | 批量缺失地标预检索并发数 |
 
-当前 v2 的联网补充通过 `rag_service.py` 使用 Tavily。`ANIME_SCENE_*` / `DIRECT_SEARCH_ENGINE` 控制旧版 `get_anime_scene` 工具，不切换 v2 的 RAG 搜索后端。整型搜索预算通过 `parse_int_env()` 解析，无效值回退默认值。
+当前 v2 的联网补充通过 `rag_service.py` 先使用 Tavily；未配置 Key、调用失败或有效来源少于 `RAG_TAVILY_MIN_RESULTS` 时，按 `RAG_DIRECT_SEARCH_ENGINES` 顺序复用旧版直接搜索与正文抓取。结果足够时跳过后续引擎；仍不足则合并已取得的资料。所有线路共用 URL 去重、相关性过滤、来源元数据，以及 `TAVILY_INCLUDE_DOMAINS` / `TAVILY_EXCLUDE_DOMAINS` 限制。备用引擎在抓取正文前也检查域名限制。取消或预算耗尽后不再启动后续请求，迟到结果不会写入审核队列。Agent 追踪记录触发原因、实际线路和新增来源数量。
+
+`ANIME_SCENE_*` / `DIRECT_SEARCH_ENGINE` 仍只控制旧版 `get_anime_scene` 工具，新版使用独立的 `RAG_*` 配置。无需修改现有 `.env` 即可启用默认兜底链；直接搜索受网络和搜索引擎页面变化影响，失败会记录提示并尝试下一条线路。整型搜索预算通过 `parse_int_env()` 解析，无效值回退默认值。
 
 </details>
 
@@ -290,13 +326,39 @@ uv run uvicorn server:app --host 127.0.0.1 --port 8000 --reload
 
 ## RAG 数据中心与运行追踪
 
-当前 Agent v2 优先读取已有地标知识，结合按 ID 召回、向量搜索和本地重排；缺失资料通过 Tavily 搜索补充。新抓取的资料先写入待审核队列，当次规划可以临时引用，并标记为 `unreviewed`。在「数据中心 → 待审核切片」查看来源、编辑切片并批准后，才写入向量库；来源保留 URL、标题、检索时间、关联点位和审核状态。
+管理后台使用独立 HTML 和入口脚本：开发环境访问 `http://localhost:5173/admin/`，生产环境访问站点的 `/admin/`。前台页面不加载管理组件；后台先向服务端验证会话，通过后才加载管理面板、请求管理数据。
+
+在后端 `.env` 中配置管理员，并重启 Python 服务：
+
+```env
+ADMIN_USERNAME=your_admin_name
+ADMIN_PASSWORD=replace_with_a_long_random_password
+ADMIN_SESSION_TTL_SECONDS=28800
+# 本地 HTTP 为 0；生产 HTTPS 必须改为 1
+ADMIN_COOKIE_SECURE=0
+```
+
+账号不能为空，密码至少 12 位；没有默认账号密码，未配置或密码过短时，所有管理读写请求返回 HTTP 503。凭据仅在后端读取，不要使用 `VITE_` 前缀。错误凭据返回 401，同一 IP 在 5 分钟内连续失败 5 次后返回 429。
+
+登录后使用随机的 HttpOnly、SameSite=Strict Cookie，会话默认 8 小时，可配置为 300–86400 秒；密码在后端内存中用 scrypt 派生后比较。会话由服务端保存，退出立即撤销，伪造、过期或已退出的 Cookie 均返回 401。管理写操作还必须携带与当前会话绑定的 `X-CSRF-Token`，缺失或错误返回 403；管理响应禁止缓存。浏览器仅在内存保存 CSRF token，不在 localStorage 保存管理员凭据或会话令牌。
+
+当前会话和登录限流保存在进程内，重启后需要重新登录。后端应使用单个 Uvicorn worker；若要部署多进程或多个实例，先接入共享会话和限流存储。生产部署需启用 HTTPS、设置 `ADMIN_COOKIE_SECURE=1`，并将 `/api/` 代理到 Python 后端；前后端保持同源。静态服务器需将 `/admin/` 指向构建产物 `dist/admin/index.html`，例如 Nginx：
+
+```nginx
+location = /admin { return 301 /admin/; }
+location /admin/ { try_files $uri $uri/ /admin/index.html; }
+location /api/ { proxy_pass http://127.0.0.1:8000; }
+```
+
+所有 `/api/rag/*`、Agent 追踪列表、追踪详情与清空追踪接口均要求管理员身份，包括旧地址，直接调用接口也不能绕过登录。普通路线规划接口继续公开使用，规划流程中的知识检索、待审核资料积累和运行记录仍由后端执行。
+
+当前 Agent v2 优先读取已有地标知识，结合按 ID 召回、向量搜索和本地重排；缺失资料通过 Tavily 优先、直接搜索兜底的链路补充。新抓取的资料先写入待审核队列，当次规划可以临时引用，并标记为 `unreviewed`。在「数据中心 → 待审核切片」查看来源、编辑切片并批准后，才写入向量库；来源保留 URL、标题、检索时间、关联点位和审核状态。
 
 数据中心提供五个面板：待审核切片、已入库地标、运行日志、召回测试、Agent 追踪。追踪按运行展示节点、模型和工具的输入输出，便于排查检索不足、调用失败或行程草案。
 
-**查看待审核资料、已入库地标、运行日志和 Agent 历史追踪，只需前端与 Python 后端正常运行，无需启动 LM Studio / Ollama 等本地模型服务。** 向量检索、召回测试和切片写入等操作会调用配置的 embedding 服务；重排不可用时会保留召回顺序。
+**管理员登录后，查看待审核资料、已入库地标、运行日志和 Agent 历史追踪，只需前端与 Python 后端正常运行，无需启动 LM Studio / Ollama 等本地模型服务。** 向量检索、召回测试和切片写入等操作会调用配置的 embedding 服务；重排不可用时会保留召回顺序。
 
-数据中心页面按需加载，期间显示加载状态。资源加载失败或超过 20 秒时，会显示失败提示及「重试」「返回巡礼地图」按钮，避免直接白屏。
+管理面板通过身份验证后按需加载，期间显示加载状态。资源加载失败或超过 20 秒时，会显示失败提示及重试按钮；退出或身份失效后卸载管理面板并清除其页面数据。
 
 | 本地文件 | 内容 |
 |----------|------|
@@ -321,6 +383,9 @@ uv run uvicorn server:app --host 127.0.0.1 --port 8000 --reload
 |------|------|------|
 | `POST` | `/api/v2/agent/plan` | 结构化规划 SSE，当前默认入口 |
 | `POST` | `/api/agent/plan` | 旧版 Agent 纯文本流兼容入口 |
+| `POST` | `/api/admin/login` | 管理员登录，需 `X-Admin-Request: 1` |
+| `GET` | `/api/admin/session` | 验证当前会话并返回 CSRF token |
+| `POST` | `/api/admin/logout` | 撤销会话，需 CSRF token |
 | `GET` | `/api/rag/landmarks` | 已入库地标列表 |
 | `GET` | `/api/rag/landmark/{landmark_id}/chunks` | 地标知识切片 |
 | `GET` | `/api/rag/query?query=...` | 召回与重排调试 |
@@ -332,7 +397,9 @@ uv run uvicorn server:app --host 127.0.0.1 --port 8000 --reload
 | `GET` | `/api/agent/traces`、`/api/agent/trace/{run_id}` | 运行摘要与追踪详情 |
 | `POST` | `/api/agent/traces/clear` | 清空追踪记录 |
 
-v2 事件包含 `event_id`、`run_id`、`type`、`payload`。正常事件序列为 `run_started → progress… → plan_ready / plan_draft / error → run_finished`；终态为 `success`、`failed` 或 `cancelled`。只有通过校验的完整 Plan 才作为成功结果保存。
+上述 RAG 与追踪接口均需管理员 Cookie，写操作还需 `X-CSRF-Token`。可运行 `uv run python -m unittest discover -s tests -p test_admin_auth.py -v` 和 `npm run test:admin` 验证未授权拦截、授权读写、CSRF、会话过期、退出撤销与前端请求处理。
+
+v2 事件包含 `event_id`、`run_id`、`type`、`payload`。正常事件序列为 `run_started → progress / step_update… → plan_ready / plan_draft / error → run_finished`；终态为 `success`、`failed` 或 `cancelled`。`step_update` 用于前台展示简短的规划过程，完整模型输入输出仅能在登录后的后台追踪中查看。只有通过校验的完整 Plan 才作为成功结果保存。
 
 ---
 
@@ -341,8 +408,9 @@ v2 事件包含 `event_id`、`run_id`、`type`、`payload`。正常事件序列�
 ```
 anime-travel/
 ├── src/                          # Vue 3 前端
-│   ├── App.vue                   # 顶部导航、响应式工作台与数据中心入口
+│   ├── App.vue                   # 顶部导航与响应式工作台
 │   ├── main.js                   # 入口文件
+│   ├── admin/                    # 独立后台入口、登录页面与鉴权请求
 │   ├── style.css                 # 全局样式
 │   ├── stores/app.js             # Pinia 全局状态
 │   ├── utils/
@@ -350,6 +418,7 @@ anime-travel/
 │   │   ├── anitabiMapData.js     # 官网索引、分片、校验与缓存
 │   │   ├── bangumiSearch.js      # 本地名称搜索与在线补充
 │   │   ├── imageUrl.js           # 图片地址与分辨率适配
+│   │   ├── planningProgress.js   # 规划过程事件归并、终态与历史恢复
 │   │   ├── recommendations.js    # 推荐作品与搜索快捷入口
 │   │   └── routePlanner.js       # 保留的 Turf.js 聚类工具
 │   ├── data/anitabi-search-index.json # 随前端打包的作品索引
@@ -359,19 +428,25 @@ anime-travel/
 │       ├── MapView.vue           # Leaflet 地图核心
 │       ├── CoordinateLibrary.vue # 我的巡礼与旅途档案
 │       ├── PlanResult.vue        # Agent Plan 逐日结果、草案和来源
+│       ├── PlanningTimeline.vue  # 规划阶段、耗时与返工过程
 │       ├── LandmarkDock.vue      # 底部横向地标条
 │       ├── RagAdminPanel.vue     # RAG 数据中心与 Agent 追踪
 │       ├── AppIcon.vue           # 公共图标
 │       └── JourneyArtwork.vue    # 界面插画
 ├── server.py                     # FastAPI 后端入口
+├── admin_auth.py                 # 管理员认证、会话、CSRF 与登录限流
+├── admin/index.html              # 独立管理页面 /admin/
 ├── agent.py                      # 旧版 Agent 兼容流程与共用模型
 ├── agent_v2.py                   # 结构化 LangGraph 规划与有限修复
 ├── agent_trace.py                # 运行追踪与本地持久化
+├── planning_progress.py          # 用户可见的阶段执行摘要
+├── weather_service.py            # 按坐标查询带日期和时段的天气快照
 ├── plan_schema.py                # 请求与 Plan 数据契约
 ├── plan_geometry.py              # 直线距离和确定性排序
 ├── plan_validation.py            # ID、天数、路段及状态校验
 ├── tools.py                      # Agent 工具集（get_anime_scene 多策略搜索 + DDG 备用）
 ├── rag_service.py                # RAG 检索与重排服务
+├── search_runtime.py             # 可取消的搜索并发收集与时间预算
 ├── tavily_config.py              # Tavily 搜索配置 + 共享常量 + parse_int_env
 ├── data/anitabi-g.json           # 官网原始索引快照
 ├── scripts/update-anitabi-cache.mjs # 搜索缓存更新脚本
@@ -399,10 +474,13 @@ Turf.js K-Means + 最近邻算法仍保留在 `src/utils/routePlanner.js` 和 st
 ## 验证与构建
 
 ```bash
-# 名称搜索、地图适配与缓存、Agent SSE 与历史快照回归
+# 名称搜索、地图适配与缓存、Agent SSE、规划过程与历史快照回归
 npm run test:search
 npm run test:map
 npm run test:agent
+
+# 管理后台请求、登录失效处理与 CSRF
+npm run test:admin
 
 # 不加载 Agent / RAG 的后端契约检查
 uv run python -B -m unittest discover -s tests -p test_plan_contract.py
@@ -415,7 +493,9 @@ npm run build
 npm run preview
 ```
 
-完整后端回归导入 RAG 模块时会初始化或打开本地 `chroma_db/`。前端回归覆盖 SSE 分块、中断、终态、草案状态、快照与旧版档案恢复、重复定位及收藏隔离；不需要真实模型密钥。前端尚未配置统一 `npm test` 命令。
+完整后端回归导入 RAG 模块时会初始化或打开本地 `chroma_db/`，模型和联网请求使用模拟。后台鉴权回归将知识库、审核队列、日志和追踪操作替换为 mock，覆盖全部 13 个管理接口的匿名拦截、授权读写、CSRF、过期、退出撤销和登录限流。前端回归覆盖 SSE 分块、中断、终态、草案状态、规划过程、天气展示、快照与旧版档案恢复、重复定位及收藏隔离；不需要调用真实模型。前端尚未配置统一 `npm test` 命令。
+
+构建同时生成 `dist/index.html`（前台）和 `dist/admin/index.html`（管理后台）；部署时保留这两个页面及其引用的资源。真实 `.env` 和 `chroma_db/` 保存在后端主机，不放入静态发布目录。
 
 ### 生产部署
 
@@ -428,7 +508,20 @@ npm run preview
 | `/ark/` | `https://ark.cn-beijing.volces.com/api/v3/` | 将前缀替换为 `/api/v3/` |
 | `/api/` | `http://127.0.0.1:8000/api/` | 保留原请求路径 |
 
-Agent 的 SSE 转发需要关闭响应缓冲，并设置足够的读取超时。后端当前面向本机个人使用，没有内置鉴权，CORS 默认仅允许 `http://localhost:5173` 和 `http://127.0.0.1:5173`；对外提供数据中心前需在部署层添加访问控制。
+管理接口内置管理员会话鉴权，写操作额外校验 CSRF；生产环境使用 HTTPS，设置 `ADMIN_COOKIE_SECURE=1`，前后端保持同源，后端使用单个 Uvicorn worker。管理页面路由配置见上方「RAG 数据中心与运行追踪」。CORS 默认仅允许 `http://localhost:5173` 和 `http://127.0.0.1:5173`，生产浏览器通过站点自己的 `/api/` 代理访问。
+
+Agent 的 SSE 转发需要关闭响应缓冲，并设置足够的读取超时。例如 `/api/` 的 Nginx 配置：
+
+```nginx
+location /api/ {
+    proxy_pass http://127.0.0.1:8000;
+    proxy_http_version 1.1;
+    proxy_buffering off;
+    proxy_read_timeout 300s;
+}
+```
+
+普通路线规划接口仍公开提供服务；需要限制调用者或请求频率时，在部署网关配置相应认证和限流。
 
 ---
 

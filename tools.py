@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 import requests
 from langchain.tools import tool
 from openai import OpenAI
+from search_runtime import run_search_tasks
 from tavily_config import (
     get_tavily_search_kwargs,
     parse_int_env,
@@ -575,13 +576,20 @@ def _direct_web_search(
     core_terms,
     max_results_per_query: int = 5,
     max_pages_to_fetch: int = 4,
+    *,
+    engines=None,
+    should_cancel=None,
+    exclude_urls=None,
+    include_domains=None,
+    exclude_domains=None,
 ):
     """拼接搜索引擎链接 + 抓取结果网页正文，替代 Tavily。
     返回 (scored_results, query_errors)，结果形状与 Tavily 路径一致。"""
     scored_results = []
-    seen_urls = set()
+    seen_urls = set(exclude_urls or [])
     query_errors = []
-    engines = _resolve_direct_search_engines()
+    engines = _resolve_direct_search_engines() if engines is None else engines
+    is_cancelled = should_cancel or (lambda: False)
     if not queries or not engines:
         return [], []
 
@@ -589,61 +597,80 @@ def _direct_web_search(
     tasks = []
     for label, query in queries:
         for engine in engines:
-            tasks.append((engine, label, query))
-    with ThreadPoolExecutor(max_workers=min(len(tasks), 4)) as executor:
-        future_to_meta = {
-            executor.submit(engine, query, max_results_per_query): (engine.__name__, label, query)
-            for engine, label, query in tasks
-        }
-        for future in as_completed(future_to_meta):
-            engine_name, label, query = future_to_meta[future]
-            try:
-                results, err = future.result()
-            except Exception as e:
-                code = _record_tool_failure("get_anime_scene", e)
-                query_errors.append((f"{engine_name}/{label}", f"[{code}] 异常: {e}"))
+            engine_name = getattr(engine, "__name__", "direct")
+            tasks.append(((engine_name, label, query), engine, (query, max_results_per_query)))
+    for (engine_name, label, query), response, error in run_search_tasks(tasks, is_cancelled, max_workers=4):
+        if error:
+            code = _record_tool_failure("get_anime_scene", error)
+            query_errors.append((f"{engine_name}/{label}", f"[{code}] 异常: {error}"))
+            continue
+        results, err = response
+        if err:
+            query_errors.append((f"{engine_name}/{label}", err))
+            continue
+        for result in results:
+            if not isinstance(result, dict):
                 continue
-            if err:
-                query_errors.append((f"{engine_name}/{label}", err))
+            url = normalize_search_url(result.get("url", ""))
+            if not url or url in seen_urls:
                 continue
-            for result in results:
-                url = result.get("url", "")
-                if not url or url in seen_urls:
-                    continue
-                if _is_noise_search_result(url, result.get("title", ""), result.get("content", "")):
-                    continue
-                seen_urls.add(url)
-                item = dict(result)
-                item["_label"] = label
-                item["_query"] = query
-                item["_score"] = _score_anime_scene_result(item, core_terms, query)
-                scored_results.append(item)
+            domain = (urlparse(url).hostname or "").lower()
+            if include_domains and not any(domain_matches(domain, allowed) for allowed in include_domains):
+                continue
+            if exclude_domains and any(domain_matches(domain, denied) for denied in exclude_domains):
+                continue
+            if _is_noise_search_result(url, result.get("title", ""), result.get("content", "")):
+                continue
+            seen_urls.add(url)
+            item = dict(result)
+            item["url"] = url
+            item["_label"] = label
+            item["_query"] = query
+            item["_score"] = _score_anime_scene_result(item, core_terms, query)
+            scored_results.append(item)
 
     # 2. 按相关性排序，取 top N 抓取完整正文（DDG 摘要太短，不够 LLM 用）
     scored_results.sort(key=lambda x: x.get("_score", 0), reverse=True)
     top = [it for it in scored_results if it.get("_score", 0) >= 3][:max_pages_to_fetch]
 
     # 3. 并发抓取页面正文，用正文替换短摘要并重新打分
-    if top:
-        with ThreadPoolExecutor(max_workers=min(len(top), 3)) as executor:
-            future_to_item = {executor.submit(_fetch_page_content, it["url"]): it for it in top}
-            for future in as_completed(future_to_item):
-                item = future_to_item[future]
-                try:
-                    content, err = future.result()
-                except Exception as e:
-                    code = _record_tool_failure("get_anime_scene", e)
-                    content, err = "", f"[{code}] 页面抓取失败: {e}"
-                if err:
-                    query_errors.append((item["_label"], err))
-                elif content and len(content) > len(item.get("content", "")):
-                    item["content"] = content
-                    item["_score"] = max(
-                        item["_score"],
-                        _score_anime_scene_result(item, core_terms, item.get("_query", "")),
-                    )
+    tasks = [(item, _fetch_page_content, (item["url"],)) for item in top]
+    for item, response, error in run_search_tasks(tasks, is_cancelled, max_workers=3):
+        if error:
+            code = _record_tool_failure("get_anime_scene", error)
+            content, err = "", f"[{code}] 页面抓取失败: {error}"
+        else:
+            content, err = response
+        if err:
+            query_errors.append((item["_label"], err))
+        elif content and len(content) > len(item.get("content", "")):
+            item["content"] = content
+            item["_score"] = max(item["_score"], _score_anime_scene_result(item, core_terms, item.get("_query", "")))
 
     return scored_results, query_errors
+
+
+def normalize_search_url(url: str) -> str:
+    """Use the same safe URL key across API results and HTML search engines."""
+    if not isinstance(url, str) or any(char.isspace() for char in url):
+        return ""
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return ""
+    return parsed._replace(fragment="", path=parsed.path.rstrip("/")).geturl()
+
+
+def search_scene_pages(queries, core_terms, engine, *, should_cancel=None, exclude_urls=None, max_pages=2):
+    """Structured legacy HTML search for the v2 RAG fallback; never parses display text."""
+    engines = {"baidu": _baidu_html_search, "bing": _bing_html_search, "ddg": _duckduckgo_html_search}
+    if engine not in engines:
+        raise ValueError(f"不支持的搜索引擎：{engine}")
+    policy = get_tavily_search_kwargs()
+    return _direct_web_search(
+        queries, core_terms, max_pages_to_fetch=max_pages, engines=[engines[engine]],
+        should_cancel=should_cancel, exclude_urls=exclude_urls,
+        include_domains=policy.get("include_domains"), exclude_domains=policy.get("exclude_domains"),
+    )
 
 
 def _resolve_anime_scene_backend() -> str:

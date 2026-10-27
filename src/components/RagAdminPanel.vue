@@ -3,11 +3,15 @@
     <!-- 顶部栏 -->
     <header class="admin-header">
       <div class="admin-header-left">
-        <button class="back-btn" @click="handleBack" title="返回地图" aria-label="返回巡礼地图">
+        <a class="back-btn" href="/" title="返回地图" aria-label="返回巡礼地图">
           <el-icon><ArrowLeft /></el-icon>
-        </button>
+        </a>
         <h1 class="admin-title">巡礼数据中心</h1>
         <span class="admin-subtitle">知识库与追踪管理</span>
+      </div>
+      <div class="admin-header-right">
+        <span class="status-text">{{ username }}</span>
+        <el-button size="small" :loading="loggingOut" @click="$emit('logout')">退出登录</el-button>
       </div>
     </header>
 
@@ -678,9 +682,12 @@ import {
   Cpu, MagicStick, Tools as ToolsIcon, ChatDotRound, InfoFilled
 } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { useAppStore } from '../stores/app'
-
-const store = useAppStore()
+const props = defineProps({
+  username: { type: String, required: true },
+  request: { type: Function, required: true },
+  loggingOut: Boolean
+})
+defineEmits(['logout'])
 
 // ---- 导航 ----
 const navTabs = [
@@ -691,10 +698,6 @@ const navTabs = [
   { key: 'agent', label: 'Agent 追踪', icon: markRaw(Cpu) }
 ]
 const activeTab = ref('pending')
-
-function handleBack() {
-  store.showAdminPage = false
-}
 
 function handleTabSwitch(key) {
   activeTab.value = key
@@ -716,7 +719,7 @@ const selectedPending = computed(() => pendingList.value.find(p => p.id === sele
 async function fetchPending() {
   loadingPending.value = true
   try {
-    const resp = await fetch('/api/rag/pending')
+    const resp = await props.request('/api/rag/pending')
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
     pendingList.value = await resp.json()
   } catch (e) {
@@ -749,7 +752,7 @@ async function handleApprove() {
   }
   actionLoading.value = true
   try {
-    const resp = await fetch('/api/rag/pending/approve', {
+    const resp = await props.request('/api/rag/pending/approve', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id: selectedPendingId.value, chunks: validChunks })
@@ -778,7 +781,7 @@ async function handleReject() {
 
   actionLoading.value = true
   try {
-    const resp = await fetch('/api/rag/pending/reject', {
+    const resp = await props.request('/api/rag/pending/reject', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id: selectedPendingId.value })
@@ -807,7 +810,7 @@ const totalDbChunks = computed(() => dbLandmarks.value.reduce((sum, lm) => sum +
 async function fetchLandmarks() {
   loadingLandmarks.value = true
   try {
-    const resp = await fetch('/api/rag/landmarks')
+    const resp = await props.request('/api/rag/landmarks')
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
     dbLandmarks.value = await resp.json()
   } catch (e) {
@@ -826,7 +829,7 @@ async function toggleLandmarkExpand(lmId) {
   expandedLandmarkId.value = lmId
   loadingChunks.value = true
   try {
-    const resp = await fetch(`/api/rag/landmark/${encodeURIComponent(lmId)}/chunks`)
+    const resp = await props.request(`/api/rag/landmark/${encodeURIComponent(lmId)}/chunks`)
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
     expandedChunks.value = await resp.json()
   } catch (e) {
@@ -847,7 +850,7 @@ async function handleDeleteLandmark(lmId, lmName) {
   } catch { return }
 
   try {
-    const resp = await fetch(`/api/rag/landmarks/${encodeURIComponent(lmId)}`, { method: 'DELETE' })
+    const resp = await props.request(`/api/rag/landmarks/${encodeURIComponent(lmId)}`, { method: 'DELETE' })
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
     ElMessage.success(`已删除地标"${lmName}"的所有数据`)
     if (expandedLandmarkId.value === lmId) {
@@ -871,7 +874,7 @@ async function handleClearDatabase() {
 
   loadingLandmarks.value = true
   try {
-    const resp = await fetch('/api/rag/clear', { method: 'POST' })
+    const resp = await props.request('/api/rag/clear', { method: 'POST' })
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
     ElMessage.success('向量数据库已清空')
     dbLandmarks.value = []
@@ -893,7 +896,7 @@ async function fetchLogs() {
   loadingLogs.value = true
   expandedLogIdx.value = null
   try {
-    const resp = await fetch('/api/rag/logs')
+    const resp = await props.request('/api/rag/logs')
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
     logs.value = await resp.json()
   } catch (e) {
@@ -915,7 +918,7 @@ async function handleClearLogs() {
 
   loadingLogs.value = true
   try {
-    const resp = await fetch('/api/rag/logs/clear', { method: 'POST' })
+    const resp = await props.request('/api/rag/logs/clear', { method: 'POST' })
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
     ElMessage.success('运行日志已清空')
     logs.value = []
@@ -950,7 +953,7 @@ async function handleRecallSearch() {
   recallSearching.value = true
   recallSearched.value = true
   try {
-    const resp = await fetch(`/api/rag/query?query=${encodeURIComponent(recallQuery.value.trim())}`)
+    const resp = await props.request(`/api/rag/query?query=${encodeURIComponent(recallQuery.value.trim())}`)
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
     recallResults.value = await resp.json()
   } catch (e) {
@@ -978,7 +981,7 @@ const expandedSteps = ref({})  // {stepId: bool}
 async function fetchAgentTraces() {
   loadingTraces.value = true
   try {
-    const resp = await fetch('/api/agent/traces')
+    const resp = await props.request('/api/agent/traces')
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
     agentTraces.value = await resp.json()
   } catch (e) {
@@ -994,7 +997,7 @@ async function selectAgentRun(runId) {
   expandedSteps.value = {}
   loadingTraceDetail.value = true
   try {
-    const resp = await fetch(`/api/agent/trace/${encodeURIComponent(runId)}`)
+    const resp = await props.request(`/api/agent/trace/${encodeURIComponent(runId)}`)
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
     const trace = await resp.json()
     // 给每个 step 分配一个稳定 id，用于展开状态映射
@@ -1110,7 +1113,7 @@ async function handleClearTraces() {
       { confirmButtonText: '确定', cancelButtonText: '取消', type: 'warning' })
   } catch { return }
   try {
-    const resp = await fetch('/api/agent/traces/clear', { method: 'POST' })
+    const resp = await props.request('/api/agent/traces/clear', { method: 'POST' })
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
     ElMessage.success('Agent 追踪记录已清空')
     agentTraces.value = []

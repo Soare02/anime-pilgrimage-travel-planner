@@ -14,14 +14,41 @@
       </ul>
     </div>
 
+    <details v-if="plan.weather?.length" class="plan-weather">
+      <summary>天气参考与预报</summary>
+      <p v-if="!plan.request_snapshot?.start_date" class="plan-weather-hint">未设置出发日期，实况和近期预报仅供参考。</p>
+      <div v-for="(weather, index) in plan.weather" :key="index" class="plan-weather-region">
+        <strong>{{ weather.location }}</strong>
+        <p>当前：{{ weather.current_summary || '暂无实况' }}</p>
+        <ul v-if="weather.forecast?.length">
+          <li v-for="forecast in weather.forecast" :key="forecast.date">
+            {{ forecast.date }} · {{ forecast.summary }}<template v-if="forecast.rain_chance_percent != null"> · 最高降雨概率 {{ forecast.rain_chance_percent }}%</template>
+            <template v-if="forecast.sunset"> · 当地日落 {{ forecast.sunset }}</template>
+            <details v-if="forecast.hourly?.length" class="plan-weather-hours">
+              <summary>分时预报（当地时间）</summary>
+              <p v-for="hour in forecast.hourly" :key="hour.time">
+                {{ hour.time }} · {{ hour.summary }}<template v-if="hour.rain_chance_percent != null"> · 降雨概率 {{ hour.rain_chance_percent }}%</template>
+              </p>
+            </details>
+          </li>
+        </ul>
+        <span class="source-meta">查询于 {{ weather.retrieved_at }}</span>
+        <a v-if="safeUrl(weather.source_url)" :href="safeUrl(weather.source_url)" target="_blank" rel="noopener noreferrer">天气来源</a>
+      </div>
+    </details>
+
     <div class="plan-days">
       <section v-for="day in dayRows" :key="day.day" class="plan-day">
         <div class="plan-day-header">
           <strong>
             <span class="plan-day-dot" :style="{ background: dayColor(day.day) }"></span>
-            第 {{ day.day }} 天
+            第 {{ day.day }} 天<small v-if="day.date" class="plan-day-date">{{ day.date }}</small>
           </strong>
           <span>直线距离 {{ formatDistance(day.straight_line_distance_m) }}</span>
+        </div>
+        <div v-if="day.planning_reason || day.weather_advice" class="plan-day-context">
+          <p v-if="day.planning_reason"><strong>安排理由：</strong>{{ day.planning_reason }}</p>
+          <p v-if="day.weather_advice"><strong>天气建议：</strong>{{ day.weather_advice }}</p>
         </div>
         <p v-if="!day.points.length" class="plan-empty-day">没有安排选中的点位</p>
         <ol v-else class="plan-stops">
@@ -50,9 +77,16 @@
                 </span>
               </span>
             </button>
-            <div v-if="noteFor(point.id) || warningsFor(point.id).length" class="plan-note">
+            <div v-if="noteFor(point.id) || preferenceFor(point.id) || warningsFor(point.id).length" class="plan-note">
+              <p v-if="preferenceFor(point.id)?.preferred_time && preferenceFor(point.id).preferred_time !== 'any'" class="plan-visit-time">
+                建议到访：{{ visitTimeLabel(preferenceFor(point.id).preferred_time) }} · 场景还原偏好
+              </p>
+              <p v-if="preferenceFor(point.id)?.scene_summary"><strong>情节参考：</strong>{{ preferenceFor(point.id).scene_summary }}</p>
+              <p v-if="preferenceFor(point.id)?.reason"><strong>安排依据：</strong>{{ preferenceFor(point.id).reason }}</p>
               <p v-if="noteFor(point.id)?.scene_description">{{ noteFor(point.id).scene_description }}</p>
+              <p v-if="noteFor(point.id)?.scene_atmosphere"><strong>原作氛围：</strong>{{ noteFor(point.id).scene_atmosphere }}</p>
               <p v-if="noteFor(point.id)?.photo_advice"><strong>拍照建议：</strong>{{ noteFor(point.id).photo_advice }}</p>
+              <p v-if="noteFor(point.id)?.pose_suggestions"><strong>动作还原：</strong>{{ noteFor(point.id).pose_suggestions }}</p>
               <p v-if="noteFor(point.id)?.cautions"><strong>注意：</strong>{{ noteFor(point.id).cautions }}</p>
               <div v-if="noteFor(point.id)?.inferred || noteFor(point.id)?.insufficient_data" class="plan-note-flags">
                 <span v-if="noteFor(point.id)?.inferred">含推测内容</span>
@@ -135,6 +169,7 @@ const dayRows = computed(() => (props.plan.days || []).map(day => ({
 const assignedIds = computed(() => new Set(dayRows.value.flatMap(day => day.points.map(point => String(point.id)))))
 const unassigned = computed(() => props.landmarks.filter(point => !assignedIds.value.has(String(point.id))))
 const notesById = computed(() => new Map((props.plan.point_notes || []).map(note => [String(note.point_id), note])))
+const preferencesById = computed(() => new Map((props.plan.scene_preferences || []).map(pref => [String(pref.point_id), pref])))
 const sourcesById = computed(() => new Map((props.plan.sources || []).map(source => [String(source.source_id), source])))
 const validSources = computed(() => (props.plan.sources || []).filter(source => source && source.source_id))
 const issues = computed(() => props.plan.validation?.errors || [])
@@ -142,6 +177,8 @@ const warnings = computed(() => props.plan.validation?.warnings || [])
 
 function dayColor(day) { return dayColors[(Math.max(1, Number(day)) - 1) % dayColors.length] }
 function noteFor(id) { return notesById.value.get(String(id)) }
+function preferenceFor(id) { return preferencesById.value.get(String(id)) }
+function visitTimeLabel(time) { return { morning: '上午', afternoon: '下午', sunset: '黄昏', evening: '夜间', any: '时段不限' }[time] || '时段不限' }
 function sourcesFor(id) {
   return (noteFor(id)?.source_ids || []).map(sourceId => sourcesById.value.get(String(sourceId))).filter(Boolean)
 }
@@ -174,6 +211,68 @@ function formatSeconds(seconds) {
   margin: 12px 0 16px;
   font-size: 13px;
   color: var(--text-color);
+}
+
+.plan-weather {
+  padding: 12px 14px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.6);
+  line-height: 1.6;
+  font-size: 12px;
+}
+
+.plan-weather summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.plan-weather-region {
+  margin-top: 10px;
+}
+
+.plan-weather-hours {
+  margin: 4px 0 8px;
+  color: var(--text-secondary);
+}
+
+.plan-weather p,
+.plan-day-context p {
+  margin: 4px 0;
+}
+
+.plan-weather ul {
+  margin: 6px 0;
+  padding-left: 18px;
+}
+
+.plan-weather a {
+  margin-left: 6px;
+  color: var(--primary-color);
+}
+
+.plan-weather-hint,
+.plan-day-date {
+  color: var(--text-secondary);
+}
+
+.plan-day-date {
+  margin-left: 6px;
+  font-size: 11px;
+  font-weight: 400;
+}
+
+.plan-day-context {
+  padding: 10px 14px;
+  background: var(--primary-soft);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+}
+
+.plan-visit-time {
+  color: var(--primary-color);
+  font-weight: 600;
 }
 
 .plan-state {

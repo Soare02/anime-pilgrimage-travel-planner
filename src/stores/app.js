@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { fetchBangumiLite, fetchBangumiPointsDetail, searchBangumiByKey, generateAIRoute } from '../utils/api'
 import { planRoute } from '../utils/routePlanner'
+import { applyPlanningStep, finishPlanningSteps, restorePlanningSteps } from '../utils/planningProgress'
 
 export const useAppStore = defineStore('app', () => {
   const bangumi = ref(null)
@@ -21,6 +22,7 @@ export const useAppStore = defineStore('app', () => {
   const coordinateLibrary = ref([])
   const libraryItinerary = ref([])
   const libraryDays = ref(1)
+  const libraryStartDate = ref('')
   const libraryAiResponse = ref('')
   const generatedLandmarks = ref([])
   const currentRequestSnapshot = ref(null)
@@ -29,13 +31,15 @@ export const useAppStore = defineStore('app', () => {
   const historyPlan = ref(null)
   const historyLandmarks = ref([])
   const planningProgress = ref('')
+  const planningSteps = ref([])
+  const planningStartedAt = ref(null)
+  const planningFinishedAt = ref(null)
   const runStatus = ref('idle')
   const historySaveError = ref('')
   const routeHistory = ref(loadRouteHistory())
   let planningRequestId = 0
   let planningController = null
   const compareData = ref(null)
-  const showAdminPage = ref(false)
   const activePanel = ref('explore')
   const settingsOpen = ref(false)
   const aiConfig = ref(loadAiConfig())
@@ -121,7 +125,7 @@ export const useAppStore = defineStore('app', () => {
     }
   }
 
-  function saveRouteHistory(landmarks, aiResponse, days, scheme, plan = null) {
+  function saveRouteHistory(landmarks, aiResponse, days, scheme, plan = null, process = null) {
     const snapshot = cloneLandmarks(landmarks)
     const record = {
       id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
@@ -136,6 +140,7 @@ export const useAppStore = defineStore('app', () => {
       record.plan = plan
       record.landmarkSnapshot = snapshot
     }
+    if (process?.steps?.length) record.planningProcess = JSON.parse(JSON.stringify(process))
     return persistRouteHistory([...routeHistory.value, record])
   }
 
@@ -377,6 +382,11 @@ export const useAppStore = defineStore('app', () => {
     return lines.join('\n')
   }
 
+  function finishPlanningProcess(status, message = '') {
+    planningFinishedAt.value ||= new Date().toISOString()
+    planningSteps.value = finishPlanningSteps(planningSteps.value, status, planningFinishedAt.value, message)
+  }
+
   function cancelLibraryItinerary() {
     if (!planningController) return
     planningRequestId++
@@ -386,6 +396,7 @@ export const useAppStore = defineStore('app', () => {
     loading.value = false
     planningProgress.value = '已取消路线规划'
     runStatus.value = 'cancelled'
+    finishPlanningProcess('cancelled')
     libraryAiResponse.value = ''
   }
 
@@ -402,7 +413,11 @@ export const useAppStore = defineStore('app', () => {
     currentRunId.value = null
     error.value = null
     planningProgress.value = ''
+    planningSteps.value = restorePlanningSteps(record?.planningProcess?.steps)
+    planningStartedAt.value = record?.planningProcess?.started_at || null
+    planningFinishedAt.value = record?.planningProcess?.finished_at || null
     libraryAiResponse.value = record?.aiResponse || ''
+    libraryStartDate.value = record?.plan?.request_snapshot?.start_date || ''
     if (!record?.plan) {
       runStatus.value = 'idle'
       return false
@@ -412,6 +427,7 @@ export const useAppStore = defineStore('app', () => {
     generatedLandmarks.value = cloneLandmarks(snapshot)
     currentRequestSnapshot.value = {
       days: record.days || plan.request_snapshot?.days || 1,
+      ...(plan.request_snapshot?.start_date ? { start_date: plan.request_snapshot.start_date } : {}),
       landmarks: cloneLandmarks(snapshot)
     }
     currentPlan.value = plan
@@ -433,19 +449,26 @@ export const useAppStore = defineStore('app', () => {
     planningController = controller
     const requestDays = libraryDays.value
     const scheme = aiConfig.value.scheme
+    const requestStartDate = scheme === 'agent' ? libraryStartDate.value : ''
     const config = { ...activeAiConfig.value }
     loading.value = true
     planning.value = true
     error.value = null
     historySaveError.value = ''
     planningProgress.value = scheme === 'agent' ? '正在启动智能体规划' : ''
+    planningSteps.value = []
+    planningStartedAt.value = new Date().toISOString()
+    planningFinishedAt.value = null
     runStatus.value = 'running'
     currentRunId.value = `request-${requestId}`
     currentPlan.value = null
     historyPlan.value = null
     libraryItinerary.value = []
     generatedLandmarks.value = selected
-    currentRequestSnapshot.value = { days: requestDays, landmarks: cloneLandmarks(selected) }
+    currentRequestSnapshot.value = {
+      days: requestDays, landmarks: cloneLandmarks(selected),
+      ...(requestStartDate ? { start_date: requestStartDate } : {})
+    }
     libraryAiResponse.value = ''
     try {
       const result = await generateAIRoute(
@@ -457,6 +480,7 @@ export const useAppStore = defineStore('app', () => {
         },
         {
           scheme,
+          startDate: requestStartDate,
           signal: controller.signal,
           onEvent(event) {
             if (requestId !== planningRequestId) return
@@ -464,6 +488,10 @@ export const useAppStore = defineStore('app', () => {
             if (event.type === 'progress') {
               planningProgress.value = event.payload.message || event.payload.status || event.payload.stage || '正在规划路线'
             }
+            if (event.type === 'step_update') {
+              planningSteps.value = applyPlanningStep(planningSteps.value, event.payload)
+            }
+            if (event.type === 'run_finished') finishPlanningProcess(event.payload.status)
           }
         }
       )
@@ -471,6 +499,7 @@ export const useAppStore = defineStore('app', () => {
       if (typeof result === 'string') {
         libraryAiResponse.value = result
         runStatus.value = 'success'
+        finishPlanningProcess('success')
         const hasMarkdown = result.split('\n')
           .filter(line => !line.startsWith('__STATUS__:') && !line.startsWith('__ERROR__:'))
           .join('').trim()
@@ -481,8 +510,11 @@ export const useAppStore = defineStore('app', () => {
         libraryItinerary.value = itineraryFromPlan(result.plan, selected)
         libraryAiResponse.value = result.text || fallbackPlanText(result.plan, selected)
         runStatus.value = result.status
+        finishPlanningProcess(result.status, result.error?.message)
         if (result.status === 'success') {
-          saveRouteHistory(selected, libraryAiResponse.value, requestDays, scheme, result.plan)
+          saveRouteHistory(selected, libraryAiResponse.value, requestDays, scheme, result.plan, {
+            steps: planningSteps.value, started_at: planningStartedAt.value, finished_at: planningFinishedAt.value
+          })
         } else {
           error.value = result.error?.message || result.plan.validation?.errors?.[0]?.message || '规划未通过，以下为草案'
         }
@@ -492,10 +524,12 @@ export const useAppStore = defineStore('app', () => {
       libraryAiResponse.value = ''
       if (e?.name === 'AbortError' || e?.code === 'RUN_CANCELLED') {
         runStatus.value = 'cancelled'
+        finishPlanningProcess('cancelled')
         planningProgress.value = '已取消路线规划'
         error.value = e?.code === 'RUN_CANCELLED' ? e.message : null
       } else {
         runStatus.value = 'failed'
+        finishPlanningProcess('failed', e.message || '规划连接中断或执行失败')
         error.value = e.message || 'AI 路线规划失败'
       }
     } finally {
@@ -527,7 +561,6 @@ export const useAppStore = defineStore('app', () => {
   }
 
   return {
-    showAdminPage,
     activePanel,
     settingsOpen,
     bangumi,
@@ -551,6 +584,7 @@ export const useAppStore = defineStore('app', () => {
     coordinateLibrary,
     libraryItinerary,
     libraryDays,
+    libraryStartDate,
     librarySelected,
     libraryAiResponse,
     generatedLandmarks,
@@ -560,6 +594,9 @@ export const useAppStore = defineStore('app', () => {
     historyPlan,
     historyLandmarks,
     planningProgress,
+    planningSteps,
+    planningStartedAt,
+    planningFinishedAt,
     runStatus,
     historySaveError,
     routeHistory,

@@ -5,22 +5,25 @@ import json
 import queue
 import threading
 import uuid
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from typing import List, Optional
+from admin_auth import require_admin, router as admin_auth_router
 from agent import agent
 from agent_v2 import run_plan
-from plan_schema import PlanRequest
+from plan_schema import MAX_DAYS, MAX_LANDMARKS, PlanRequest
 from rag_service import rag_service
 import agent_trace
 
 app = FastAPI(title="Anime Pilgrimage Travel Planner Agent Server")
+management_router = APIRouter(dependencies=[Depends(require_admin)], tags=["administration"])
+app.include_router(admin_auth_router)
 
-# P2: 限制 CORS 为前端确切来源（Vite 代理）/ P3: localhost 个人工具无需额外鉴权
+# 浏览器通过同源 /api 代理访问；跨域请求不能携带管理员 Cookie。
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
@@ -50,14 +53,33 @@ def format_timestamp(seconds: float) -> str:
 
 @app.exception_handler(RequestValidationError)
 async def validation_error_response(request: Request, exc: RequestValidationError):
+    if request.url.path == "/api/admin/login":
+        return JSONResponse(status_code=422, content={"detail": "请填写有效的管理员账号和密码。"},
+                            headers={"Cache-Control": "no-store"})
     if request.url.path not in {"/api/v2/agent/plan", "/api/agent/plan"}:
         return await request_validation_exception_handler(request, exc)
-    fields = [{
-        "field": ".".join(str(part) for part in error.get("loc", ()) if part != "body"),
-        "message": error.get("msg", "输入无效"),
-    } for error in exc.errors()]
+    fields = []
+    for error in exc.errors():
+        location = tuple(part for part in error.get("loc", ()) if part != "body")
+        message = error.get("msg", "输入无效").removeprefix("Value error, ")
+        if location == ("days",):
+            message = f"巡礼天数必须为 1–{MAX_DAYS} 的整数"
+        elif location == ("start_date",):
+            message = "出发日期必须是 YYYY-MM-DD 格式的有效日期"
+        elif location == ("landmarks",):
+            if error.get("type") == "too_long":
+                count = len(exc.body.get("landmarks", [])) if isinstance(exc.body, dict) else "过多"
+                message = f"已选择 {count} 个地标，单次最多支持 {MAX_LANDMARKS} 个，请减少地标数量"
+            else:
+                message = "请至少选择一个地标，并按列表提交"
+        elif len(location) >= 3 and location[0] == "landmarks" and isinstance(location[1], int):
+            labels = {"id": "编号", "name": "名称", "geo": "坐标", "s": "场景时间", "ep": "集数", "image": "图片地址"}
+            field = labels.get(location[2], str(location[2]))
+            message = f"第 {location[1] + 1} 个地标的{field}无效：{message}"
+        fields.append({"field": ".".join(map(str, location)), "message": message})
+    messages = list(dict.fromkeys(field["message"] for field in fields))
     return JSONResponse(status_code=422, content={
-        "code": "INVALID_INPUT", "message": "请选择有效的天数和地标坐标后重试", "fields": fields,
+        "code": "INVALID_INPUT", "message": "规划请求参数无效：" + "；".join(messages[:3]), "fields": fields,
     })
 
 
@@ -75,11 +97,15 @@ async def plan_route_v2_endpoint(req: PlanRequest, request: Request):
         if not cancelled.is_set():
             events.put(("progress", {"stage": stage, "message": message}))
 
+    def on_step(step: dict) -> None:
+        if not cancelled.is_set():
+            events.put(("step_update", step))
+
     def worker() -> None:
         agent_trace.attach_run(run_id)
         try:
             plan, errors, text = run_plan(
-                req, run_id, on_progress=on_progress, should_cancel=cancelled.is_set,
+                req, run_id, on_progress=on_progress, should_cancel=cancelled.is_set, on_step=on_step,
             )
             if cancelled.is_set() or any(error.code == "RUN_CANCELLED" for error in errors):
                 if not cancelled.is_set():
@@ -261,7 +287,7 @@ def plan_route_endpoint(req: PlanRequest):
         print(f'[plan_route_endpoint] {traceback.format_exc()}')
         raise HTTPException(status_code=500, detail='服务器内部错误')
 
-@app.get("/api/rag/landmarks")
+@management_router.get("/api/rag/landmarks")
 def get_rag_landmarks_endpoint():
     try:
         if not rag_service.db:
@@ -292,7 +318,7 @@ def get_rag_landmarks_endpoint():
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail='服务器内部错误')
 
-@app.get("/api/rag/query")
+@management_router.get("/api/rag/query")
 def query_rag_test_endpoint(query: str):
     try:
         if not query.strip():
@@ -323,7 +349,7 @@ def query_rag_test_endpoint(query: str):
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail='服务器内部错误')
 
-@app.post("/api/rag/clear")
+@management_router.post("/api/rag/clear")
 def clear_rag_database_endpoint():
     try:
         rag_service.clear_database()
@@ -332,7 +358,7 @@ def clear_rag_database_endpoint():
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail='服务器内部错误')
 
-@app.get("/api/rag/logs")
+@management_router.get("/api/rag/logs")
 def get_rag_logs_endpoint():
     try:
         import json
@@ -345,7 +371,7 @@ def get_rag_logs_endpoint():
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail='服务器内部错误')
 
-@app.post("/api/rag/logs/clear")
+@management_router.post("/api/rag/logs/clear")
 def clear_rag_logs_endpoint():
     try:
         log_file = os.path.join(os.path.dirname(__file__), "chroma_db", "rag_history.json")
@@ -356,7 +382,7 @@ def clear_rag_logs_endpoint():
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail='服务器内部错误')
 
-@app.get("/api/rag/pending")
+@management_router.get("/api/rag/pending")
 def get_pending_endpoint():
     """获取待审核暂存队列"""
     try:
@@ -365,7 +391,7 @@ def get_pending_endpoint():
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail='服务器内部错误')
 
-@app.post("/api/rag/pending/approve")
+@management_router.post("/api/rag/pending/approve")
 def approve_pending_endpoint(req: ApproveRequest):
     """审批通过暂存记录并写入 ChromaDB"""
     try:
@@ -380,7 +406,7 @@ def approve_pending_endpoint(req: ApproveRequest):
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail='服务器内部错误')
 
-@app.post("/api/rag/pending/reject")
+@management_router.post("/api/rag/pending/reject")
 def reject_pending_endpoint(req: RejectRequest):
     """拒绝暂存记录"""
     try:
@@ -395,7 +421,7 @@ def reject_pending_endpoint(req: RejectRequest):
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail='服务器内部错误')
 
-@app.delete("/api/rag/landmarks/{landmark_id}")
+@management_router.delete("/api/rag/landmarks/{landmark_id}")
 def delete_landmark_endpoint(landmark_id: str):
     """从向量库中删除指定地标的所有知识数据"""
     try:
@@ -410,7 +436,7 @@ def delete_landmark_endpoint(landmark_id: str):
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail='服务器内部错误')
 
-@app.get("/api/rag/landmark/{landmark_id}/chunks")
+@management_router.get("/api/rag/landmark/{landmark_id}/chunks")
 def get_landmark_chunks_endpoint(landmark_id: str):
     """获取指定地标在向量数据库中的所有切片详情"""
     try:
@@ -432,7 +458,7 @@ def get_landmark_chunks_endpoint(landmark_id: str):
 
 # ---------------- Agent 调试追踪相关端点 ----------------
 
-@app.get("/api/agent/traces")
+@management_router.get("/api/agent/traces")
 def list_agent_traces_endpoint():
     """列出最近的 agent 运行（摘要，不含 steps）"""
     try:
@@ -441,7 +467,7 @@ def list_agent_traces_endpoint():
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail='服务器内部错误')
 
-@app.get("/api/agent/trace/{run_id}")
+@management_router.get("/api/agent/trace/{run_id}")
 def get_agent_trace_endpoint(run_id: str):
     """获取指定 run 的完整 trace（包含所有 LLM/工具步骤）"""
     try:
@@ -455,7 +481,7 @@ def get_agent_trace_endpoint(run_id: str):
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail='服务器内部错误')
 
-@app.post("/api/agent/traces/clear")
+@management_router.post("/api/agent/traces/clear")
 def clear_agent_traces_endpoint():
     """清空所有 agent 追踪记录"""
     try:
@@ -464,6 +490,8 @@ def clear_agent_traces_endpoint():
     except Exception as e:
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail='服务器内部错误')
+
+app.include_router(management_router)
 
 if __name__ == "__main__":
     import uvicorn

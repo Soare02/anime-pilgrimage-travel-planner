@@ -10,7 +10,8 @@
     "cache:anitabi": "node scripts/update-anitabi-cache.mjs",
     "test:search": "node --test tests/bangumi-search.test.mjs",
     "test:map": "node --test tests/anitabi-map-data.test.mjs",
-    "test:agent": "node --test tests/agent-sse.test.mjs"
+    "test:admin": "node --test tests/admin-api.test.mjs",
+    "test:agent": "node --test tests/agent-sse.test.mjs tests/planning-progress.test.mjs tests/plan-result.test.mjs"
   },
   "dependencies": {
     "vue": "^3.4.21",

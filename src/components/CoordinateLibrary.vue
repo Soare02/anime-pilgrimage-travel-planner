@@ -128,6 +128,16 @@
                 :disabled="librarySelected.length === 0"
               />
             </div>
+            <div v-if="store.aiConfig.scheme === 'agent'" class="lib-start-date">
+              <label class="lib-label" for="pilgrimage-start-date">出发日期（可选）</label>
+              <input
+                id="pilgrimage-start-date"
+                v-model="store.libraryStartDate"
+                type="date"
+                :disabled="planning || librarySelected.length === 0"
+              />
+              <span>结合预报安排晴雨天，黄昏与夜景按原作氛围编排</span>
+            </div>
             <el-button
               type="primary"
               @click="handleGenerate"
@@ -155,7 +165,16 @@
           <div v-if="store.historySaveError" class="lib-ai-error">
             <el-alert :title="store.historySaveError" type="warning" show-icon :closable="false" />
           </div>
-          <div v-if="planning && store.planningProgress" class="plan-progress" role="status">
+          <PlanningTimeline
+            v-if="store.planningSteps.length"
+            :steps="store.planningSteps"
+            :status="store.runStatus"
+            :started-at="store.planningStartedAt"
+            :finished-at="store.planningFinishedAt"
+            :request-snapshot="store.currentRequestSnapshot"
+            @cancel="store.cancelLibraryItinerary()"
+          />
+          <div v-else-if="planning && store.planningProgress" class="plan-progress" role="status">
             <el-icon class="is-loading" :size="16"><Loading /></el-icon>
             <span>{{ store.planningProgress }}</span>
             <button class="text-button" @click="store.cancelLibraryItinerary()">取消</button>
@@ -367,6 +386,16 @@
             </div>
 
             <div v-if="expandedId === record.id" class="history-body">
+              <details v-if="record.planningProcess?.steps?.length" class="history-process">
+                <summary>查看规划过程</summary>
+                <PlanningTimeline
+                  :steps="record.planningProcess.steps"
+                  :status="record.plan?.status === 'complete' ? 'success' : 'failed'"
+                  :started-at="record.planningProcess.started_at"
+                  :finished-at="record.planningProcess.finished_at"
+                  :request-snapshot="record.plan?.request_snapshot"
+                />
+              </details>
               <PlanResult
                 v-if="record.plan"
                 :plan="record.plan"
@@ -548,6 +577,7 @@ import { storeToRefs } from 'pinia'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import AppIcon from './AppIcon.vue'
 import PlanResult from './PlanResult.vue'
+import PlanningTimeline from './PlanningTimeline.vue'
 import { fetchBangumiLite, fetchBangumiPointsDetail } from '../utils/api'
 import { getImageUrl } from '../utils/imageUrl'
 
@@ -1160,6 +1190,34 @@ function renderMarkdown(text) {
   color: var(--text-secondary);
 }
 
+.lib-start-date {
+  display: grid;
+  gap: 7px;
+}
+
+.lib-start-date input {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 34px;
+  padding: 6px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-color, #fff);
+  color: var(--text-color);
+  font: inherit;
+}
+
+.lib-start-date input:focus-visible {
+  outline: 2px solid var(--primary-color);
+  outline-offset: 2px;
+}
+
+.lib-start-date > span {
+  font-size: 11px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
 .lib-controls :deep(.el-input-number) {
   width: 110px;
 }
@@ -1745,6 +1803,13 @@ function renderMarkdown(text) {
   background: var(--primary-soft);
   color: var(--primary-color);
   font-size: 13px;
+}
+
+.history-process > summary {
+  color: var(--primary-color);
+  cursor: pointer;
+  padding: 8px 0;
+  font-size: 12px;
 }
 
 .plan-progress span {

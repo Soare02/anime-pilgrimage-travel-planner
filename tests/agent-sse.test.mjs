@@ -46,6 +46,12 @@ function sseResponse(events, splitAt = 1) {
 const config = { url: '/api/v2/agent/plan' }
 const landmarks = [{ id: 'A', name: '宇治桥', geo: [34.89, 135.8] }]
 
+function phase(stage, sequence, status = 'completed') {
+  return { id: `phase:${stage}:1`, stage, kind: 'phase', status, title: stage, summary: `${stage} 的执行小结`,
+    sequence, order: sequence, attempt: 1, started_at: '2026-10-26T12:00:00Z',
+    ...(status === 'completed' ? { finished_at: '2026-10-26T12:00:01Z', duration_ms: 1000 } : {}) }
+}
+
 test('SSE decodes split Chinese bytes and requires a terminal success', async () => {
   const plan = { status: 'complete', validation: { passed: true }, days: [{ day: 1, point_ids: ['A'] }] }
   const events = [
@@ -73,6 +79,18 @@ test('SSE interruption cannot become a successful result', async () => {
   )
 })
 
+test('departure date is submitted only when selected', async () => {
+  const requests = []
+  globalThis.fetch = async (url, options) => {
+    requests.push(JSON.parse(options.body))
+    return new Response('兼容结果', { headers: { 'content-type': 'text/plain' } })
+  }
+  await generateAIRoute(1, landmarks, config, null, { scheme: 'agent', startDate: '2026-10-26' })
+  await generateAIRoute(1, landmarks, config, null, { scheme: 'agent' })
+  assert.equal(requests[0].start_date, '2026-10-26')
+  assert.equal('start_date' in requests[1], false)
+})
+
 test('draft event cannot carry a complete Plan', async () => {
   globalThis.fetch = async () => sseResponse([
     envelope('run_started', { message: '开始' }, 1),
@@ -93,7 +111,19 @@ test('legacy text and typed field errors stay compatible', async () => {
   })
   await assert.rejects(
     generateAIRoute(1, landmarks, config, null, { scheme: 'agent' }),
-    error => error.code === 'INVALID_INPUT' && error.message.includes('坐标无效')
+    error => error.code === 'INVALID_INPUT' && error.message.includes('坐标越界')
+  )
+})
+
+test('422 displays the failing field instead of the generic days and coordinates message', async () => {
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    code: 'INVALID_INPUT', message: '请选择有效的天数和地标坐标后重试',
+    fields: [{ field: 'landmarks.0.s', message: '第 1 个地标的场景时间无效' }]
+  }), { status: 422, headers: { 'content-type': 'application/json' } })
+  await assert.rejects(
+    generateAIRoute(1, landmarks, config, null, { scheme: 'agent' }),
+    error => error.code === 'INVALID_INPUT' && error.message.includes('第 1 个地标的场景时间无效') &&
+      !error.message.includes('请选择有效的天数')
   )
 })
 
@@ -107,7 +137,9 @@ test('saved Plan restores point order and snapshot without remote data', () => {
   ]
   const plan = {
     schema_version: 1, plan_id: 'plan-fixed', run_id: 'run-fixed', status: 'complete',
-    request_snapshot: { days: 2, landmarks: snapshot },
+    request_snapshot: { days: 2, landmarks: snapshot, start_date: '2026-10-26' },
+    weather: [{ location: '宇治', current_summary: '晴', forecast: [{ date: '2026-10-27', summary: '雨' }] }],
+    scene_preferences: [{ point_id: 'A', preferred_time: 'sunset', reason: '还原原作黄昏场景' }],
     days: [
       { day: 1, point_ids: ['B'], legs: [], straight_line_distance_m: 0 },
       { day: 2, point_ids: ['A'], legs: [], straight_line_distance_m: 0 }
@@ -119,6 +151,10 @@ test('saved Plan restores point order and snapshot without remote data', () => {
   assert.equal(store.generatedLandmarks[0].bangumiName, '作品甲')
   assert.equal(store.currentPlan.plan_id, 'plan-fixed')
   assert.equal(store.libraryAiResponse, '# 行程')
+  assert.equal(store.libraryStartDate, '2026-10-26')
+  assert.equal(store.currentRequestSnapshot.start_date, '2026-10-26')
+  assert.equal(store.currentPlan.weather[0].location, '宇治')
+  assert.equal(store.currentPlan.scene_preferences[0].preferred_time, 'sunset')
   assert.deepEqual(store.historyLandmarks, snapshot)
   assert.deepEqual(store.coordinateLibrary, [])
 })
@@ -156,4 +192,72 @@ test('legacy archive points can be focused repeatedly without changing the pilgr
   store.historyLandmarks[0].geo[0] = 0
   assert.equal(archivePoints[0].geo[0], 34.89)
   assert.deepEqual(store.coordinateLibrary, [saved])
+})
+
+test('live step summaries are retained, saved, and restored with a successful itinerary', async () => {
+  storage.clear()
+  setActivePinia(createPinia())
+  const store = useAppStore()
+  store.aiConfig.scheme = 'agent'
+  store.coordinateLibrary = landmarks.map(point => ({ ...point, checked: true }))
+  const plan = { status: 'complete', validation: { passed: true }, request_snapshot: { days: 1, landmarks }, days: [{ day: 1, point_ids: ['A'], straight_line_distance_m: 0 }] }
+  const stages = ['input', 'retrieve', 'experience', 'route', 'validate', 'enrich']
+  globalThis.fetch = async () => sseResponse([
+    envelope('run_started', {}, 1),
+    ...stages.map((stage, index) => envelope('step_update', phase(stage, index + 1), index + 2)),
+    envelope('plan_ready', { plan, text: '# 计划' }, 8), envelope('run_finished', { status: 'success' }, 9)
+  ], 9)
+  await store.generateLibraryItinerary()
+  assert.equal(store.runStatus, 'success')
+  assert.equal(store.planningSteps.length, 6)
+  assert.ok(store.planningSteps.every(step => step.status === 'completed'))
+  const record = store.routeHistory.at(-1)
+  assert.equal(record.planningProcess.steps[1].summary, 'retrieve 的执行小结')
+  assert.ok(record.planningProcess.finished_at)
+  store.planningSteps[1].summary = '更改当前显示'
+  assert.equal(record.planningProcess.steps[1].summary, 'retrieve 的执行小结')
+  store.restoreRouteHistory(record)
+  assert.equal(store.planningSteps[1].summary, 'retrieve 的执行小结')
+  assert.equal(store.planningFinishedAt, record.planningProcess.finished_at)
+})
+
+test('cancel keeps completed summaries and stops active progress without saving a success', async () => {
+  storage.clear()
+  setActivePinia(createPinia())
+  const store = useAppStore()
+  store.aiConfig.scheme = 'agent'
+  store.coordinateLibrary = landmarks.map(point => ({ ...point, checked: true }))
+  globalThis.fetch = async (url, options) => new Response(new ReadableStream({
+    start(controller) {
+      const events = [envelope('run_started', {}, 1), envelope('step_update', phase('input', 1), 2), envelope('step_update', phase('retrieve', 2, 'running'), 3)]
+      controller.enqueue(new TextEncoder().encode(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join('')))
+      options.signal.addEventListener('abort', () => controller.error(new DOMException('Aborted', 'AbortError')), { once: true })
+    }
+  }), { headers: { 'content-type': 'text/event-stream' } })
+  const pending = store.generateLibraryItinerary()
+  for (let count = 0; count < 20 && store.planningSteps.length < 2; count++) await new Promise(resolve => setImmediate(resolve))
+  assert.equal(store.planningSteps.length, 2)
+  store.cancelLibraryItinerary()
+  await pending
+  assert.equal(store.runStatus, 'cancelled')
+  assert.equal(store.planningSteps[0].status, 'completed')
+  assert.equal(store.planningSteps[1].status, 'cancelled')
+  assert.ok(store.planningFinishedAt)
+  assert.equal(store.routeHistory.length, 0)
+})
+
+test('interrupted planning preserves completed summaries and marks the active phase failed', async () => {
+  storage.clear()
+  setActivePinia(createPinia())
+  const store = useAppStore()
+  store.aiConfig.scheme = 'agent'
+  store.coordinateLibrary = landmarks.map(point => ({ ...point, checked: true }))
+  globalThis.fetch = async () => sseResponse([
+    envelope('run_started', {}, 1), envelope('step_update', phase('input', 1), 2), envelope('step_update', phase('route', 2, 'running'), 3)
+  ], 5)
+  await store.generateLibraryItinerary()
+  assert.equal(store.runStatus, 'failed')
+  assert.equal(store.planningSteps[0].status, 'completed')
+  assert.equal(store.planningSteps[1].status, 'failed')
+  assert.equal(store.routeHistory.length, 0)
 })

@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import math
 import uuid
+from datetime import timedelta
 from typing import Any
 
-from plan_geometry import build_day, straight_line_distance_m
-from plan_schema import Plan, PlanIssue, PlanValidation, PointId, PlanRequest, point_key
+from plan_geometry import build_day, ordering_constraints, respects_order, straight_line_distance_m
+from plan_schema import Plan, PlanIssue, PlanValidation, PointId, PlanRequest, ScenePreference, WeatherSnapshot, point_key
 
 
 def issue(code: str, message: str, point_ids: list[PointId] | None = None, day: int | None = None) -> PlanIssue:
@@ -21,6 +22,8 @@ def normalize_candidate(
     *,
     warnings: list[PlanIssue] | None = None,
     audit_errors: list[PlanIssue] | None = None,
+    scene_preferences: list[ScenePreference] | None = None,
+    weather: list[WeatherSnapshot] | None = None,
 ) -> tuple[Plan | None, list[PlanIssue]]:
     """Keep valid candidate IDs, expose every rejected or missing reference."""
     if not isinstance(candidate, dict) or not isinstance(candidate.get("days"), list):
@@ -34,6 +37,7 @@ def normalize_candidate(
     groups: dict[int, list[PointId]] = {day: [] for day in range(1, request.days + 1)}
     used: set[str] = set()
     seen_days: set[int] = set()
+    day_details: dict[int, dict] = {}
     for index, raw_day in enumerate(raw_days, start=1):
         if not isinstance(raw_day, dict):
             errors.append(issue("MODEL_OUTPUT_INVALID", f"第 {index} 个每日安排不是对象"))
@@ -43,6 +47,7 @@ def normalize_candidate(
             errors.append(issue("DAY_COUNT_MISMATCH", f"第 {index} 个每日安排的 day 无效或重复"))
             continue
         seen_days.add(day)
+        day_details[day] = raw_day
         refs = raw_day.get("point_ids")
         if not isinstance(refs, list):
             errors.append(issue("MODEL_OUTPUT_INVALID", f"第 {day} 天缺少 point_ids 数组", day=day))
@@ -70,7 +75,13 @@ def normalize_candidate(
     all_warnings = list(warnings or [])
     days = []
     for day_number in range(1, request.days + 1):
-        day = build_day(day_number, groups[day_number], request.landmarks)
+        day = build_day(day_number, groups[day_number], request.landmarks, scene_preferences)
+        day.date = request.start_date + timedelta(days=day_number - 1) if request.start_date else None
+        details = day_details.get(day_number, {})
+        for field in ("planning_reason", "weather_advice"):
+            value = details.get(field)
+            if isinstance(value, str):
+                setattr(day, field, value.strip()[:1200])
         days.append(day)
         if not day.point_ids:
             all_warnings.append(issue("EMPTY_DAY", f"第 {day_number} 天没有安排选中的点位", day=day_number))
@@ -85,6 +96,7 @@ def normalize_candidate(
         days=days,
         unassigned_point_ids=unassigned,
         validation=PlanValidation(passed=not errors, errors=errors, warnings=all_warnings),
+        scene_preferences=scene_preferences or [], weather=weather or [],
     )
     invariant_errors = validate_plan(plan, request)
     if invariant_errors:
@@ -103,6 +115,12 @@ def validate_plan(plan: Plan, request: PlanRequest) -> list[PlanIssue]:
     for day in plan.days:
         keys = [point_key(pid) for pid in day.point_ids]
         assigned.extend(keys)
+        expected_date = request.start_date + timedelta(days=day.day - 1) if request.start_date else None
+        if day.date != expected_date:
+            errors.append(issue("DAY_DATE_MISMATCH", "行程日期与出发日期不一致", day=day.day))
+        constraints = ordering_constraints(day.point_ids, request.landmarks, plan.scene_preferences)
+        if not respects_order(keys, constraints):
+            errors.append(issue("SCENE_ORDER_CONFLICT", "访问顺序与原作场景时段或剧情顺序冲突", day=day.day))
         if len(day.legs) != max(0, len(keys) - 1):
             errors.append(issue("MODEL_OUTPUT_INVALID", "路段数量与点位顺序不一致", day=day.day))
             continue
