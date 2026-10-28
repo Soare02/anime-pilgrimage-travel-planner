@@ -431,8 +431,7 @@ anime-travel/
 │       ├── PlanningTimeline.vue  # 规划阶段、耗时与返工过程
 │       ├── LandmarkDock.vue      # 底部横向地标条
 │       ├── RagAdminPanel.vue     # RAG 数据中心与 Agent 追踪
-│       ├── AppIcon.vue           # 公共图标
-│       └── JourneyArtwork.vue    # 界面插画
+│       └── AppIcon.vue           # 公共图标
 ├── server.py                     # FastAPI 后端入口
 ├── admin_auth.py                 # 管理员认证、会话、CSRF 与登录限流
 ├── admin/index.html              # 独立管理页面 /admin/

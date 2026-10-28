@@ -10,3 +10,14 @@ chroma_db/
 *.log
 codereview.md
 verification_artifacts/
+
+# Local notes and retired files
+/CLAUDE.md
+/PROJECT_SUMMARY.md
+/rag.md
+/架构图.md
+/路线规划模块代码对应.md
+/Agent能力评估与改造方案.md
+/前端设计委托书.md
+/src/components/JourneyArtwork.vue
+/.agents/
